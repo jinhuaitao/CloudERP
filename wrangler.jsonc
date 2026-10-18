@@ -1,0 +1,44 @@
+{
+  // 进销通 jinxiao-system · Cloudflare Workers 配置
+  // 注意：d1_databases 故意不写 database_id —— 首次 wrangler deploy 会自动供给 D1 数据库
+  // R2 存储桶由 npm run deploy:ci 中的 scripts/ensure-r2.mjs 自动创建
+  "name": "jinxiao-system",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // 静态资源（前端页面）
+  "assets": { "directory": "./public" },
+
+  // 数据库：D1（SQLite）
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "jinxiao-db",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  // 对象存储：R2（商品图片、头像、数据备份）
+  "r2_buckets": [
+    {
+      "binding": "R2",
+      "bucket_name": "jinxiao-files"
+    }
+  ],
+
+  // 定时任务：每小时清理过期会话/登录记录；每天凌晨 3 点自动备份数据到 R2
+  "triggers": { "crons": ["0 * * * *", "0 3 * * *"] },
+
+  // 把 migrations/*.sql 以文本形式打进 bundle，供运行时自愈建表使用
+  "rules": [{ "type": "Text", "globs": ["**/*.sql"], "fallthrough": true }],
+
+  "vars": {
+    "APP_NAME": "进销通",
+    "SESSION_TTL_HOURS": "12",
+    "REMEMBER_TTL_DAYS": "30",
+    "MAX_LOGIN_ATTEMPTS": "5",
+    "LOCK_MINUTES": "15",
+    "MAX_UPLOAD_MB": "5"
+  }
+}
