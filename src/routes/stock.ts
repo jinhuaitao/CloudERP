@@ -47,14 +47,15 @@ export function registerStock(app: Hono<AppEnv>) {
       const s = store(c);
       const { page, pageSize } = getPagination(c);
       const q = (c.req.query("q") || "").trim();
-      const res = await s.listPurchaseOrders({ page, pageSize, q: q || undefined });
+      const status = (c.req.query("status") || "").trim();
+      const res = await s.listPurchaseOrders({ page, pageSize, q: q || undefined, status: status || undefined });
       const ctx = pageCtx(c);
       return c.html(
         layout({
-          title: "进货单",
+          title: "进货管理",
           ctx,
           active: "purchase",
-          content: purchaseListPage(ctx, { rows: res.rows, total: res.total, page, pageSize, q }),
+          content: purchaseListPage(ctx, { rows: res.rows, total: res.total, page, pageSize, q, status }),
         })
       );
     } catch (e) {
@@ -72,13 +73,14 @@ export function registerStock(app: Hono<AppEnv>) {
         s.listProducts({ page: 1, pageSize: 200 }),
         s.listSuppliers(),
       ]);
+      const preselectPid = parseInt(c.req.query("product_id") || "", 10) || undefined;
       const ctx = pageCtx(c);
       return c.html(
         layout({
           title: "新增进货单",
           ctx,
           active: "purchase",
-          content: purchaseFormPage(ctx, { products: prods.rows, suppliers }),
+          content: purchaseFormPage(ctx, { products: prods.rows, suppliers, preselectPid }),
         })
       );
     } catch (e) {
@@ -95,15 +97,17 @@ export function registerStock(app: Hono<AppEnv>) {
       const f = await parseForm(c);
       const fields = f.fields;
       const supplier_id = parseInt(fields.supplier_id || "", 10) || null;
+      const paid = fields.paid !== undefined && fields.paid !== "" ? parseFloat(fields.paid) || 0 : undefined;
       const items = parseItems(f.all);
       const order_no = await s.createPurchaseOrder({
         supplier_id,
         operator_id: me.id,
+        paid,
         remark: (fields.remark || "").trim(),
         items,
       });
       await s.audit(me.id, "新建进货单", "进货单", `创建进货单 ${order_no}`, clientIP(c));
-      return redirectWith(c, "/purchase", `进货单 ${order_no} 创建成功`);
+      return redirectWith(c, "/purchase", `进货单 ${order_no} 创建成功，库存与加权成本已更新`);
     } catch (e) {
       if (e instanceof HTTPException) throw e;
       return redirectWith(c, "/purchase/new", undefined, "创建失败：" + (e as Error).message);
@@ -149,10 +153,14 @@ export function registerStock(app: Hono<AppEnv>) {
       const s = store(c);
       const { page, pageSize } = getPagination(c);
       const q = (c.req.query("q") || "").trim();
+      const status = (c.req.query("status") || "").trim();
+      const debtOnly = c.req.query("debt") === "1";
       const res = await s.listSalesOrders({
         page,
         pageSize,
         q: q || undefined,
+        status: status || undefined,
+        debtOnly,
         salesId: me.role === "sales" ? me.id : undefined,
         customerId: me.role === "customer" ? me.id : undefined,
       });
@@ -168,6 +176,8 @@ export function registerStock(app: Hono<AppEnv>) {
             page,
             pageSize,
             q,
+            status,
+            debtOnly,
             canCreate: me.role !== "customer",
             showSales: me.role === "admin",
           }),
@@ -186,7 +196,7 @@ export function registerStock(app: Hono<AppEnv>) {
       const s = store(c);
       const [prods, customersRes, salesTeam] = await Promise.all([
         s.listProducts({ status: "on", page: 1, pageSize: 200 }),
-        s.listUsers({ role: "customer", page: 1, pageSize: 200 }),
+        s.listUsers({ role: "customer", status: "active", page: 1, pageSize: 200 }),
         s.listSalesUsers(),
       ]);
       const ctx = pageCtx(c);
@@ -220,7 +230,6 @@ export function registerStock(app: Hono<AppEnv>) {
       const fields = f.fields;
       const items = parseItems(f.all);
       const customer_id = parseInt(fields.customer_id || "", 10) || null;
-      // 销售员只能以自己名义开单；管理员可指定
       const sales_id = me.role === "sales" ? me.id : parseInt(fields.sales_id || "", 10) || null;
       const order_no = await s.createSalesOrder({
         customer_id,
@@ -248,10 +257,14 @@ export function registerStock(app: Hono<AppEnv>) {
       const o = id ? await s.getSalesOrder(id) : null;
       if (!o) return notFound(c);
       if (me.role === "sales" && o.sales_id !== me.id) {
-        throw new HTTPException(403, { res: c.html(errorPage(pageCtx(c), 403, "无权访问", "您只能查看自己的销售单。"), 403) });
+        throw new HTTPException(403, {
+          res: c.html(errorPage(pageCtx(c), 403, "无权访问", "您只能查看自己的销售单。"), 403),
+        });
       }
       if (me.role === "customer" && o.customer_id !== me.id) {
-        throw new HTTPException(403, { res: c.html(errorPage(pageCtx(c), 403, "无权访问", "您只能查看自己的订单。"), 403) });
+        throw new HTTPException(403, {
+          res: c.html(errorPage(pageCtx(c), 403, "无权访问", "您只能查看自己的订单。"), 403),
+        });
       }
       const ctx = pageCtx(c);
       return c.html(
@@ -266,6 +279,37 @@ export function registerStock(app: Hono<AppEnv>) {
       if (e instanceof HTTPException) throw e;
       const ctx = pageCtx(c);
       return c.html(errorPage(ctx, 500, "出错了", "加载销售单失败：" + (e as Error).message), 500);
+    }
+  });
+
+  /** 新增：销售单欠款补收核销 */
+  app.post("/sales/:id/pay", async (c) => {
+    const me = needRoles(c, ["admin", "sales"]);
+    const s = store(c);
+    const id = parseInt(c.req.param("id") || "", 10) || 0;
+    try {
+      const o = id ? await s.getSalesOrder(id) : null;
+      if (!o) return notFound(c);
+      if (me.role === "sales" && o.sales_id !== me.id) {
+        throw new HTTPException(403, {
+          res: c.html(errorPage(pageCtx(c), 403, "无权访问", "您只能操作自己的销售单。"), 403),
+        });
+      }
+      const { fields } = await parseForm(c);
+      const amount = parseFloat(fields.amount || "") || 0;
+      const payment = (fields.payment || "").trim() || undefined;
+      const updated = await s.paySalesOrderDebt(id, amount, payment);
+      await s.audit(
+        me.id,
+        "收款核销",
+        "销售单",
+        `销售单 ${updated.order_no} 补收款 ¥${amount.toFixed(2)}（累计已收 ¥${updated.paid.toFixed(2)}）`,
+        clientIP(c)
+      );
+      return redirectWith(c, `/sales/${id}`, `已成功登记收款 ¥${amount.toFixed(2)}`);
+    } catch (e) {
+      if (e instanceof HTTPException) throw e;
+      return redirectWith(c, `/sales/${id}`, undefined, "收款登记失败：" + (e as Error).message);
     }
   });
 
@@ -289,14 +333,15 @@ export function registerStock(app: Hono<AppEnv>) {
       needRoles(c, ["admin", "sales"]);
       const s = store(c);
       const { page, pageSize } = getPagination(c);
-      const res = await s.listReturnOrders({ page, pageSize });
+      const q = (c.req.query("q") || "").trim();
+      const res = await s.listReturnOrders({ page, pageSize, q: q || undefined });
       const ctx = pageCtx(c);
       return c.html(
         layout({
           title: "退货单",
           ctx,
           active: "returns",
-          content: returnListPage(ctx, { rows: res.rows, total: res.total, page, pageSize }),
+          content: returnListPage(ctx, { rows: res.rows, total: res.total, page, pageSize, q }),
         })
       );
     } catch (e) {
@@ -314,13 +359,14 @@ export function registerStock(app: Hono<AppEnv>) {
         s.listProducts({ page: 1, pageSize: 200 }),
         s.listUsers({ role: "customer", page: 1, pageSize: 200 }),
       ]);
+      const soNo = (c.req.query("order_no") || "").trim();
       const ctx = pageCtx(c);
       return c.html(
         layout({
           title: "新增退货单",
           ctx,
           active: "returns",
-          content: returnFormPage(ctx, { products: prods.rows, customers: customersRes.rows }),
+          content: returnFormPage(ctx, { products: prods.rows, customers: customersRes.rows, defaultOrderNo: soNo }),
         })
       );
     } catch (e) {
@@ -338,7 +384,6 @@ export function registerStock(app: Hono<AppEnv>) {
       const fields = f.fields;
       const items = parseItems(f.all);
       const customer_id = parseInt(fields.customer_id || "", 10) || null;
-      // 关联原销售单：按单号精确匹配
       let sales_order_id: number | null = null;
       const soNo = (fields.sales_order_no || "").trim();
       if (soNo) {
@@ -364,19 +409,39 @@ export function registerStock(app: Hono<AppEnv>) {
 
   app.get("/returns/:id", async (c) => {
     try {
-      needRoles(c, ["admin", "sales"]);
+      const me = needRoles(c, ["admin", "sales"]);
       const s = store(c);
       const id = parseInt(c.req.param("id") || "", 10) || 0;
       const o = id ? await s.getReturnOrder(id) : null;
       if (!o) return notFound(c);
       const ctx = pageCtx(c);
       return c.html(
-        layout({ title: `退货单 ${o.order_no}`, ctx, active: "returns", content: returnDetailPage(ctx, o) })
+        layout({
+          title: `退货单 ${o.order_no}`,
+          ctx,
+          active: "returns",
+          content: returnDetailPage(ctx, o, me.role === "admin"),
+        })
       );
     } catch (e) {
       if (e instanceof HTTPException) throw e;
       const ctx = pageCtx(c);
       return c.html(errorPage(ctx, 500, "出错了", "加载退货单失败：" + (e as Error).message), 500);
+    }
+  });
+
+  /** 新增：作废退货单并回滚库存 */
+  app.post("/returns/:id/void", async (c) => {
+    const me = needRoles(c, ["admin"]);
+    const s = store(c);
+    const id = parseInt(c.req.param("id") || "", 10) || 0;
+    try {
+      await s.voidReturnOrder(id, me.id);
+      await s.audit(me.id, "作废退货单", "退货单", `作废退货单 #${id}`, clientIP(c));
+      return redirectWith(c, "/returns", "退货单已作废，库存已扣回");
+    } catch (e) {
+      if (e instanceof HTTPException) throw e;
+      return redirectWith(c, "/returns", undefined, "作废失败：" + (e as Error).message);
     }
   });
 
@@ -386,7 +451,8 @@ export function registerStock(app: Hono<AppEnv>) {
       needRoles(c, ["admin", "sales"]);
       const s = store(c);
       const { page, pageSize } = getPagination(c);
-      const productIdQ = (c.req.query("product_id") || "").trim();
+      // 兼容 product_id 与 productId 两种参数名
+      const productIdQ = (c.req.query("product_id") || c.req.query("productId") || "").trim();
       const productId = parseInt(productIdQ, 10) || null;
       const type = (c.req.query("type") || "").trim();
       const fromQ = (c.req.query("from") || "").trim();
@@ -441,8 +507,8 @@ export function registerStock(app: Hono<AppEnv>) {
       const { fields } = await parseForm(c);
       const product_id = parseInt(fields.product_id || "", 10) || 0;
       const actual_qty = parseFloat(fields.actual_qty || "");
-      if (!product_id) return redirectWith(c, "/adjust", undefined, "请选择商品");
-      if (isNaN(actual_qty) || actual_qty < 0) return redirectWith(c, "/adjust", undefined, "实盘数量无效");
+      if (!product_id) return redirectWith(c, "/adjust", undefined, "请选择盘点商品");
+      if (isNaN(actual_qty) || actual_qty < 0) return redirectWith(c, "/adjust", undefined, "实盘数量必须为非负数值");
       await s.adjustStock({
         product_id,
         actual_qty,
@@ -450,7 +516,7 @@ export function registerStock(app: Hono<AppEnv>) {
         remark: (fields.remark || "").trim(),
       });
       await s.audit(me.id, "库存盘点", "商品", `盘点商品 #${product_id}，实盘 ${actual_qty}`, clientIP(c));
-      return redirectWith(c, "/movements", "盘点调整已入账");
+      return redirectWith(c, "/movements", "盘点调整已入账并生成流水");
     } catch (e) {
       if (e instanceof HTTPException) throw e;
       return redirectWith(c, "/adjust", undefined, "盘点失败：" + (e as Error).message);
@@ -505,18 +571,19 @@ export function registerStock(app: Hono<AppEnv>) {
       const f = await parseForm(c);
       const fields = f.fields;
       const items = parseItems(f.all);
+      const payment = (fields.payment || "").trim() || "wechat";
       const order_no = await s.createSalesOrder({
         customer_id: me.id,
         sales_id: null,
         operator_id: me.id,
         discount: 0,
         paid: 0,
-        payment: (fields.payment || "").trim() || "cash",
+        payment,
         remark: (fields.remark || "").trim(),
         items,
       });
       await s.audit(me.id, "客户下单", "销售单", `客户自助下单 ${order_no}`, clientIP(c));
-      return redirectWith(c, "/sales", "下单成功，等待商家处理");
+      return redirectWith(c, "/sales", `订单 ${order_no} 提交成功，等待商家核实收款`);
     } catch (e) {
       if (e instanceof HTTPException) throw e;
       return redirectWith(c, "/shop", undefined, "下单失败：" + (e as Error).message);

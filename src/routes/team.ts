@@ -23,7 +23,7 @@ function buildTree(users: User[]): TeamNode[] {
   const roots: TeamNode[] = [];
   for (const n of map.values()) {
     const parent = n.parent_id ? map.get(n.parent_id) : undefined;
-    if (parent) parent.children.push(n);
+    if (parent && parent.id !== n.id) parent.children.push(n);
     else roots.push(n);
   }
   return roots;
@@ -118,17 +118,22 @@ export function registerTeam(app: Hono<AppEnv>) {
       }
       const monthStart = utc8Range(todayUTC8().slice(0, 7) + "-01").start;
       const now = new Date().toISOString();
-      const monthStats: Record<number, { orderCount: number; total: number; profit: number; teamOrderCount: number; teamTotal: number }> = {};
+      const monthStats: Record<
+        number,
+        { orderCount: number; total: number; profit: number; teamOrderCount: number; teamTotal: number }
+      > = {};
       for (const n of flatten(tree)) {
         monthStats[n.id] = await s.salesStats(n.id, monthStart, now);
       }
+      // 修复：仅管理员或一级销售员可以发展下级（二级销售不可再发展三级）
+      const canAdd = me.role === "admin" || me.sales_level === 1;
       const ctx = pageCtx(c);
       return c.html(
         layout({
           title: "销售团队",
           ctx,
           active: "team",
-          content: teamPage(ctx, { tree, monthStats, canAdd: true, isAdmin: me.role === "admin" }),
+          content: teamPage(ctx, { tree, monthStats, canAdd, isAdmin: me.role === "admin" }),
         })
       );
     } catch (e) {
@@ -142,6 +147,9 @@ export function registerTeam(app: Hono<AppEnv>) {
   app.get("/team/new", async (c) => {
     try {
       const me = needRoles(c, ["admin", "sales"]);
+      if (me.role === "sales" && me.sales_level !== 1) {
+        return redirectWith(c, "/team", undefined, "二级销售无法继续发展下级");
+      }
       const s = store(c);
       const users = await s.listSalesUsers();
       const parents = me.role === "admin" ? users.filter((u) => u.sales_level === 1) : [];
@@ -171,10 +179,14 @@ export function registerTeam(app: Hono<AppEnv>) {
     const me = needRoles(c, ["admin", "sales"]);
     const s = store(c);
     try {
+      if (me.role === "sales" && me.sales_level !== 1) {
+        return redirectWith(c, "/team", undefined, "二级销售无法继续发展下级");
+      }
       const { fields } = await parseForm(c);
       const username = (fields.username || "").trim();
       const password = fields.password || "";
       const nickname = (fields.nickname || "").trim() || username;
+      const phone = (fields.phone || "").trim();
       const err = validateUsername(username) || validatePassword(password);
       if (err) return redirectWith(c, "/team/new", undefined, err);
       if (await s.getUserByUsername(username)) return redirectWith(c, "/team/new", undefined, "用户名已存在");
@@ -186,18 +198,22 @@ export function registerTeam(app: Hono<AppEnv>) {
         if (level === 2) {
           parent_id = parseInt(fields.parent_id || "", 10) || null;
           if (!parent_id) return redirectWith(c, "/team/new", undefined, "二级销售必须选择一名上级销售");
+          const pUser = await s.getUserById(parent_id);
+          if (!pUser || pUser.role !== "sales" || pUser.sales_level !== 1) {
+            return redirectWith(c, "/team/new", undefined, "所选上级必须为有效的一级销售");
+          }
         }
       } else {
-        // 销售员只能发展自己的二级下线
         level = 2;
         parent_id = me.id;
       }
-      const commission_rate = parseFloat(fields.commission_rate || "") || 0;
+      const commission_rate = Math.max(0, Math.min(100, parseFloat(fields.commission_rate || "") || 0));
       await s.createUser({
         username,
         password_hash: await hashPassword(password),
         role: "sales",
         nickname,
+        phone,
         parent_id,
         sales_level: level,
         commission_rate,
@@ -216,9 +232,11 @@ export function registerTeam(app: Hono<AppEnv>) {
       const me = needRoles(c, ["admin", "sales"]);
       const s = store(c);
       const { page, pageSize } = getPagination(c);
-      const qSalesId = parseInt(c.req.query("sales_id") || "", 10) || undefined;
+      // 兼容 sales_id 与 salesId 两种查询参数名
+      const qSalesId = parseInt(c.req.query("sales_id") || c.req.query("salesId") || "", 10) || undefined;
       const status = (c.req.query("status") || "").trim();
-      const salesId = me.role === "sales" ? me.id : qSalesId;      const [res, summary, salesTeam] = await Promise.all([
+      const salesId = me.role === "sales" ? me.id : qSalesId;
+      const [res, summary, salesTeam] = await Promise.all([
         s.listCommissions({ salesId, status: status || undefined, page, pageSize }),
         s.commissionSummary(salesId),
         s.listSalesUsers(),
@@ -267,10 +285,12 @@ export function registerTeam(app: Hono<AppEnv>) {
     const me = needRoles(c, ["admin"]);
     const s = store(c);
     try {
-      const salesId = parseInt(c.req.query("salesId") || "", 10) || undefined;
+      const f = await parseForm(c);
+      const salesId =
+        parseInt(f.fields.salesId || c.req.query("salesId") || c.req.query("sales_id") || "", 10) || undefined;
       const n = await s.settleAll(salesId);
       await s.audit(me.id, "批量结算佣金", "佣金", `批量结算 ${n} 笔待结算佣金`, clientIP(c));
-      return redirectWith(c, "/commissions", `已结算 ${n} 笔佣金`);
+      return redirectWith(c, "/commissions", n > 0 ? `已成功结算 ${n} 笔待结算佣金` : "当前没有待结算的佣金");
     } catch (e) {
       if (e instanceof HTTPException) throw e;
       return redirectWith(c, "/commissions", undefined, "结算失败：" + (e as Error).message);

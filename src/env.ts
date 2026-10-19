@@ -27,6 +27,7 @@ export type AppEnv = {
     user: SafeUser | null;
     csrfToken: string;
     settings: Record<string, string>;
+    lowStockCount: number;
   };
 };
 

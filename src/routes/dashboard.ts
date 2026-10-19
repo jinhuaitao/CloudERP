@@ -21,12 +21,13 @@ export function registerDashboard(app: Hono<AppEnv>) {
     try {
       const me = needRoles(c, ["admin", "sales"]);
       const s = store(c);
-      const [stats, trend, low, recentRes, top] = await Promise.all([
+      const [stats, trend, low, recentRes, top, catVal] = await Promise.all([
         s.dashboardStats(),
         s.salesTrend(14),
         s.lowStockProducts(),
-        s.listSalesOrders({ page: 1, pageSize: 5 }),
+        s.listSalesOrders({ page: 1, pageSize: 6, salesId: me.role === "sales" ? me.id : undefined }),
         s.topProducts(30, 8),
+        s.categoryValue(),
       ]);
       let personal: {
         orderCount: number;
@@ -51,6 +52,7 @@ export function registerDashboard(app: Hono<AppEnv>) {
             low,
             recent: recentRes.rows,
             top,
+            catVal,
             personal,
           }),
         })

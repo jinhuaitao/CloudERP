@@ -37,6 +37,7 @@ import {
   fmtDT,
   todayUTC8,
   utc8Range,
+  round2,
 } from "../lib";
 
 function notFound(c: Parameters<typeof pageCtx>[0]) {
@@ -63,15 +64,21 @@ export function registerSystem(app: Hono<AppEnv>) {
         const r = await db.prepare(sql).bind(start, end).first<{ v: number }>();
         return Number(r?.v || 0);
       };
-      const [purchaseTotal, salesTotal, profit, returnTotal, orderCount] = await Promise.all([
-        num("SELECT COALESCE(SUM(total),0) AS v FROM purchase_orders WHERE status='done' AND created_at>=? AND created_at<?"),
-        num("SELECT COALESCE(SUM(total),0) AS v FROM sales_orders WHERE status='done' AND created_at>=? AND created_at<?"),
-        num(`SELECT COALESCE(SUM((si.price-si.cost)*si.qty),0) AS v FROM sales_items si
-             JOIN sales_orders so ON so.id=si.order_id
-             WHERE so.status='done' AND so.created_at>=? AND so.created_at<?`),
-        num("SELECT COALESCE(SUM(total),0) AS v FROM return_orders WHERE created_at>=? AND created_at<?"),
-        num("SELECT COUNT(*) AS v FROM sales_orders WHERE status='done' AND created_at>=? AND created_at<?"),
-      ]);
+      // 修复：退货汇总增加 status='done' 过滤，利润扣除销售折扣，并新增实收金额与待收欠款统计
+      const [purchaseTotal, salesTotal, salesPaid, salesDiscount, rawProfit, returnTotal, orderCount, commissionTotal] =
+        await Promise.all([
+          num("SELECT COALESCE(SUM(total),0) AS v FROM purchase_orders WHERE status='done' AND created_at>=? AND created_at<?"),
+          num("SELECT COALESCE(SUM(total),0) AS v FROM sales_orders WHERE status='done' AND created_at>=? AND created_at<?"),
+          num("SELECT COALESCE(SUM(paid),0) AS v FROM sales_orders WHERE status='done' AND created_at>=? AND created_at<?"),
+          num("SELECT COALESCE(SUM(discount),0) AS v FROM sales_orders WHERE status='done' AND created_at>=? AND created_at<?"),
+          num(`SELECT COALESCE(SUM((si.price-si.cost)*si.qty),0) AS v FROM sales_items si
+               JOIN sales_orders so ON so.id=si.order_id
+               WHERE so.status='done' AND so.created_at>=? AND so.created_at<?`),
+          num("SELECT COALESCE(SUM(total),0) AS v FROM return_orders WHERE status='done' AND created_at>=? AND created_at<?"),
+          num("SELECT COUNT(*) AS v FROM sales_orders WHERE status='done' AND created_at>=? AND created_at<?"),
+          num("SELECT COALESCE(SUM(amount),0) AS v FROM commissions WHERE created_at>=? AND created_at<?"),
+        ]);
+      const profit = round2(rawProfit - salesDiscount);
       const ctx = pageCtx(c);
       return c.html(
         layout({
@@ -81,10 +88,12 @@ export function registerSystem(app: Hono<AppEnv>) {
           content: reportPage(ctx, {
             from,
             to,
-            purchaseTotal: Math.round(purchaseTotal * 100) / 100,
-            salesTotal: Math.round(salesTotal * 100) / 100,
-            profit: Math.round(profit * 100) / 100,
-            returnTotal: Math.round(returnTotal * 100) / 100,
+            purchaseTotal: round2(purchaseTotal),
+            salesTotal: round2(salesTotal),
+            salesPaid: round2(salesPaid),
+            profit,
+            returnTotal: round2(returnTotal),
+            commissionTotal: round2(commissionTotal),
             orderCount,
           }),
         })
@@ -109,24 +118,25 @@ export function registerSystem(app: Hono<AppEnv>) {
       let body: (string | number | null | undefined)[][] = [];
       if (type === "sales") {
         filename = `销售单_${from}_${to}.csv`;
-        head = ["单号", "客户", "销售员", "金额", "优惠", "已付", "支付方式", "状态", "创建时间"];
+        head = ["单号", "客户", "销售员", "应收金额", "优惠折扣", "实收金额", "欠款金额", "支付方式", "状态", "创建时间"];
         const { rows } = await s.listSalesOrders({ page: 1, pageSize: 5000 });
         body = rows
           .filter((o) => inRange(o.created_at))
           .map((o) => [
             o.order_no,
-            o.customer_name || "",
+            o.customer_name || "散客",
             o.sales_name || "",
             o.total,
             o.discount,
             o.paid,
+            round2(o.total - o.paid),
             paymentName(o.payment),
             o.status === "done" ? "已完成" : "已作废",
             fmtDT(o.created_at),
           ]);
       } else if (type === "purchase") {
         filename = `进货单_${from}_${to}.csv`;
-        head = ["单号", "供应商", "金额", "已付", "操作人", "状态", "创建时间"];
+        head = ["单号", "供应商", "总金额", "已付金额", "操作人", "状态", "创建时间"];
         const { rows } = await s.listPurchaseOrders({ page: 1, pageSize: 5000 });
         body = rows
           .filter((o) => inRange(o.created_at))
@@ -141,10 +151,11 @@ export function registerSystem(app: Hono<AppEnv>) {
           ]);
       } else if (type === "movements") {
         filename = `库存流水_${from}_${to}.csv`;
-        head = ["商品", "变动数量", "变动前", "变动后", "类型", "关联", "操作人", "备注", "时间"];
+        head = ["商品", "SKU", "变动数量", "变动前", "变动后", "类型", "关联单据", "操作人", "备注", "时间"];
         const { rows } = await s.listMovements({ from: start, to: end, page: 1, pageSize: 5000 });
         body = rows.map((m) => [
           m.product_name || `#${m.product_id}`,
+          m.sku || "",
           m.change,
           m.before_qty,
           m.after_qty,
@@ -156,16 +167,19 @@ export function registerSystem(app: Hono<AppEnv>) {
         ]);
       } else if (type === "products") {
         filename = `商品档案_${todayUTC8()}.csv`;
-        head = ["商品名", "分类", "SKU", "单位", "进货价", "售价", "库存", "预警线", "状态"];
+        head = ["商品名", "分类", "供应商", "SKU", "条码", "单位", "进货成本价", "销售价", "当前库存", "库存货值", "安全库存", "状态"];
         const { rows } = await s.listProducts({ page: 1, pageSize: 5000 });
         body = rows.map((p) => [
           p.name,
           p.category_name || "",
+          p.supplier_name || "",
           p.sku || "",
+          p.barcode || "",
           p.unit,
           p.purchase_price,
           p.sale_price,
           p.stock,
+          round2(p.stock * p.purchase_price),
           p.min_stock,
           p.status === "on" ? "上架" : "下架",
         ]);
@@ -191,14 +205,15 @@ export function registerSystem(app: Hono<AppEnv>) {
       const s = store(c);
       const { page, pageSize } = getPagination(c);
       const q = (c.req.query("q") || "").trim();
-      const res = await s.listUsers({ q: q || undefined, page, pageSize });
+      const role = (c.req.query("role") || "").trim();
+      const res = await s.listUsers({ q: q || undefined, role: role || undefined, page, pageSize });
       const ctx = pageCtx(c);
       return c.html(
         layout({
           title: "用户管理",
           ctx,
           active: "users",
-          content: userListPage(ctx, { rows: res.rows, total: res.total, page, pageSize, q }),
+          content: userListPage(ctx, { rows: res.rows, total: res.total, page, pageSize, q, role }),
         })
       );
     } catch (e) {
@@ -232,6 +247,7 @@ export function registerSystem(app: Hono<AppEnv>) {
       const username = (fields.username || "").trim();
       const password = fields.password || "";
       const role = (fields.role || "").trim() as Role;
+      const status = fields.status === "disabled" ? "disabled" : "active";
       const err =
         validateUsername(username) ||
         validatePassword(password) ||
@@ -243,6 +259,7 @@ export function registerSystem(app: Hono<AppEnv>) {
         username,
         password_hash: await hashPassword(password),
         role,
+        status,
         nickname,
         phone: (fields.phone || "").trim(),
         email: (fields.email || "").trim(),
@@ -254,10 +271,10 @@ export function registerSystem(app: Hono<AppEnv>) {
         if (base.sales_level === 2 && !base.parent_id) {
           return redirectWith(c, "/users/new", undefined, "二级销售必须选择一名上级销售");
         }
-        base.commission_rate = parseFloat(fields.commission_rate || "") || 0;
+        base.commission_rate = Math.max(0, Math.min(100, parseFloat(fields.commission_rate || "") || 0));
       }
       if (role === "customer") {
-        base.credit_limit = parseFloat(fields.credit_limit || "") || 0;
+        base.credit_limit = Math.max(0, parseFloat(fields.credit_limit || "") || 0);
       }
       const id = await s.createUser(base);
       await s.audit(me.id, "新增用户", "用户", `新增${role}用户 ${username}（#${id}）`, clientIP(c));
@@ -295,21 +312,59 @@ export function registerSystem(app: Hono<AppEnv>) {
       const target = id ? await s.getUserById(id) : null;
       if (!target) return notFound(c);
       const { fields } = await parseForm(c);
+      const newRole = (["admin", "sales", "customer"].includes(fields.role) ? fields.role : target.role) as Role;
+      const newStatus = (fields.status === "disabled" ? "disabled" : "active") as "active" | "disabled";
+
+      if (target.id === me.id && newStatus === "disabled") {
+        return redirectWith(c, `/users/${id}/edit`, undefined, "不能禁用当前登录的管理员账号");
+      }
+      if (
+        target.role === "admin" &&
+        (newRole !== "admin" || newStatus === "disabled") &&
+        (await s.countAdmins()) <= 1
+      ) {
+        return redirectWith(c, `/users/${id}/edit`, undefined, "系统必须至少保留一名正常状态的管理员");
+      }
+
       const patch: Parameters<Store["updateUser"]>[1] = {
+        role: newRole,
+        status: newStatus,
         nickname: (fields.nickname || "").trim() || target.username,
         phone: (fields.phone || "").trim(),
         email: (fields.email || "").trim(),
       };
-      if (target.role === "sales") {
+      if (newRole === "sales") {
         const level = parseInt(fields.sales_level || "1", 10) || 1;
         patch.sales_level = level === 2 ? 2 : 1;
-        patch.parent_id = patch.sales_level === 2 ? parseInt(fields.parent_id || "", 10) || null : null;
-        patch.commission_rate = parseFloat(fields.commission_rate || "") || 0;
+        if (patch.sales_level === 2) {
+          if ((await s.countSubordinates(id)) > 0) {
+            return redirectWith(
+              c,
+              `/users/${id}/edit`,
+              undefined,
+              "该一级销售名下已有下级销售员，请先转移其下级后再变更为二级"
+            );
+          }
+          const pid = parseInt(fields.parent_id || "", 10) || null;
+          if (!pid || pid === id) {
+            return redirectWith(c, `/users/${id}/edit`, undefined, "二级销售必须指定一名有效的一级销售作为上级");
+          }
+          patch.parent_id = pid;
+        } else {
+          patch.parent_id = null;
+        }
+        patch.commission_rate = Math.max(0, Math.min(100, parseFloat(fields.commission_rate || "") || 0));
+      } else {
+        patch.sales_level = 0;
+        patch.parent_id = null;
       }
-      if (target.role === "customer") {
-        patch.credit_limit = parseFloat(fields.credit_limit || "") || 0;
+      if (newRole === "customer") {
+        patch.credit_limit = Math.max(0, parseFloat(fields.credit_limit || "") || 0);
       }
       await s.updateUser(id, patch);
+      if (newStatus === "disabled") {
+        await s.deleteUserSessions(id);
+      }
       const newPw = fields.password || "";
       if (newPw) {
         const pv = validatePassword(newPw);
@@ -442,7 +497,8 @@ export function registerSystem(app: Hono<AppEnv>) {
       }
       const pv = validatePassword(fields.new_password || "");
       if (pv) return redirectWith(c, "/profile/password", undefined, pv);
-      if (fields.new_password !== (fields.confirm || "")) {
+      const confirmPw = fields.confirm_password ?? fields.confirm ?? "";
+      if (fields.new_password !== confirmPw) {
         return redirectWith(c, "/profile/password", undefined, "两次输入的新密码不一致");
       }
       await s.setPassword(u.id, await hashPassword(fields.new_password));
@@ -450,7 +506,7 @@ export function registerSystem(app: Hono<AppEnv>) {
       const sid = sidFromCookie(c);
       await s.deleteUserSessions(u.id, sid ? await sha256hex(sid) : undefined);
       await s.audit(u.id, "修改密码", "账号", "用户修改登录密码", clientIP(c));
-      return redirectWith(c, "/profile", "密码修改成功");
+      return redirectWith(c, "/profile", "密码修改成功，其他设备已自动下线");
     } catch (e) {
       if (e instanceof HTTPException) throw e;
       return redirectWith(c, "/profile/password", undefined, "修改失败：" + (e as Error).message);
@@ -499,6 +555,7 @@ export function registerSystem(app: Hono<AppEnv>) {
     const u = me(c);
     const s = store(c);
     try {
+      await parseForm(c);
       const sid = sidFromCookie(c);
       await s.deleteUserSessions(u.id, sid ? await sha256hex(sid) : undefined);
       await s.audit(u.id, "注销会话", "账号", "注销其他登录会话", clientIP(c));
@@ -513,12 +570,15 @@ export function registerSystem(app: Hono<AppEnv>) {
     const u = me(c);
     const s = store(c);
     try {
+      await parseForm(c);
       const target = decodeURIComponent(c.req.param("id") || "");
       const sid = sidFromCookie(c);
       const current = sid ? await sha256hex(sid) : "";
       if (!target) return redirectWith(c, "/profile", undefined, "参数错误");
       if (target === current) return redirectWith(c, "/profile", undefined, "不能注销当前会话");
-      await s.deleteSession(target);
+      // 修复水平越权漏洞：仅允许删除属于当前登录用户的会话
+      const deleted = await s.deleteUserSessionById(target, u.id);
+      if (!deleted) return redirectWith(c, "/profile", undefined, "会话不存在或无权操作");
       await s.audit(u.id, "注销会话", "账号", "注销指定登录会话", clientIP(c));
       return redirectWith(c, "/profile", "会话已注销");
     } catch (e) {
@@ -547,7 +607,13 @@ export function registerSystem(app: Hono<AppEnv>) {
       const { fields } = await parseForm(c);
       await s.setSetting("site_name", (fields.site_name || "").trim() || "进销通");
       await s.setSetting("allow_register", fields.allow_register ? "1" : "0");
-      for (const k of ["commission_base", "commission_l1_default", "commission_l2_default", "commission_l1_override", "backup_keep"]) {
+      for (const k of [
+        "commission_base",
+        "commission_l1_default",
+        "commission_l2_default",
+        "commission_l1_override",
+        "backup_keep",
+      ]) {
         await s.setSetting(k, (fields[k] || "").trim());
       }
       await s.audit(me.id, "系统设置", "设置", "更新系统设置", clientIP(c));
@@ -567,18 +633,21 @@ export function registerSystem(app: Hono<AppEnv>) {
         c.env.R2.list({ prefix: "backups/" }),
         s.getSettings(),
       ]);
-      const backups = (listed.objects || []).map((o) => ({
-        key: o.key,
-        size: o.size,
-        uploaded: o.uploaded.toISOString(),
-      }));
+      // 按上传时间倒序排列，最新备份排最前
+      const backups = (listed.objects || [])
+        .map((o) => ({
+          key: o.key,
+          size: o.size,
+          uploaded: o.uploaded.toISOString(),
+        }))
+        .sort((a, b) => b.uploaded.localeCompare(a.uploaded));
       const ctx = pageCtx(c);
       return c.html(
         layout({
           title: "备份维护",
           ctx,
           active: "maintenance",
-          content: maintenancePage(ctx, { backups, keep: settings.backup_keep || "7" }),
+          content: maintenancePage(ctx, { backups, keep: settings.backup_keep || "14" }),
         })
       );
     } catch (e) {
@@ -592,6 +661,7 @@ export function registerSystem(app: Hono<AppEnv>) {
     const me = needRoles(c, ["admin"]);
     const s = store(c);
     try {
+      await parseForm(c);
       const data = await s.exportBackup();
       const key = `backups/manual-${Date.now()}.json`;
       await c.env.R2.put(key, JSON.stringify(data), { httpMetadata: { contentType: "application/json" } });
@@ -642,7 +712,6 @@ export function registerSystem(app: Hono<AppEnv>) {
         return redirectWith(c, "/maintenance", undefined, "备份文件格式不正确");
       }
       await s.importBackup(data as { tables: Record<string, Record<string, unknown>[]> });
-      // 用户表已被覆盖，会话中的 user_id 可能失效：注销全员会话
       await c.env.DB.prepare("DELETE FROM sessions").run();
       await s.audit(null, "数据恢复", "备份", `从备份文件恢复数据（${file.name}）`, clientIP(c));
       return redirectWith(c, "/login", "恢复成功，请重新登录");

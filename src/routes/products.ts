@@ -33,10 +33,18 @@ export function registerProducts(app: Hono<AppEnv>) {
       const s = store(c);
       const { page, pageSize } = getPagination(c);
       const q = (c.req.query("q") || "").trim();
-      const categoryIdQ = (c.req.query("category_id") || "").trim();
+      // 兼容 category_id 与 categoryId 两种查询参数名
+      const categoryIdQ = (c.req.query("category_id") || c.req.query("categoryId") || "").trim();
       const categoryId = parseInt(categoryIdQ, 10) || null;
+      const status = (c.req.query("status") || "").trim();
       const [res, categories] = await Promise.all([
-        s.listProducts({ q: q || undefined, categoryId: categoryId || undefined, page, pageSize }),
+        s.listProducts({
+          q: q || undefined,
+          categoryId: categoryId || undefined,
+          status: status || undefined,
+          page,
+          pageSize,
+        }),
         s.listCategories(),
       ]);
       const ctx = pageCtx(c);
@@ -53,6 +61,7 @@ export function registerProducts(app: Hono<AppEnv>) {
             q,
             categories,
             categoryId: categoryIdQ,
+            status,
             canEdit: me.role === "admin",
           }),
         })
@@ -72,7 +81,12 @@ export function registerProducts(app: Hono<AppEnv>) {
       const [categories, suppliers] = await Promise.all([s.listCategories(), s.listSuppliers()]);
       const ctx = pageCtx(c);
       return c.html(
-        layout({ title: "新增商品", ctx, active: "products", content: productFormPage(ctx, { categories, suppliers }) })
+        layout({
+          title: "新增商品",
+          ctx,
+          active: "products",
+          content: productFormPage(ctx, { categories, suppliers }),
+        })
       );
     } catch (e) {
       if (e instanceof HTTPException) throw e;
@@ -104,12 +118,14 @@ export function registerProducts(app: Hono<AppEnv>) {
         max_stock: num(fields.max_stock),
         image_key: image_key || "",
         remark: (fields.remark || "").trim(),
+        operator_id: me.id,
       });
       await s.audit(me.id, "新增商品", "商品", `新增商品 ${name}`, clientIP(c));
       return redirectWith(c, "/products", "商品创建成功");
     } catch (e) {
       if (e instanceof HTTPException) throw e;
-      return redirectWith(c, "/products/new", undefined, "创建失败：" + (e as Error).message);
+      const msg = /UNIQUE/i.test((e as Error).message) ? "SKU 已存在，请更换或留空自动生成" : (e as Error).message;
+      return redirectWith(c, "/products/new", undefined, "创建失败：" + msg);
     }
   });
 
@@ -181,7 +197,8 @@ export function registerProducts(app: Hono<AppEnv>) {
       return redirectWith(c, "/products", "商品更新成功");
     } catch (e) {
       if (e instanceof HTTPException) throw e;
-      return redirectWith(c, `/products/${id}/edit`, undefined, "更新失败：" + (e as Error).message);
+      const msg = /UNIQUE/i.test((e as Error).message) ? "SKU 已存在，请更换" : (e as Error).message;
+      return redirectWith(c, `/products/${id}/edit`, undefined, "更新失败：" + msg);
     }
   });
 
@@ -240,7 +257,7 @@ export function registerProducts(app: Hono<AppEnv>) {
     }
   });
 
-  // ---------- 分类 ----------
+  // ---------- 分类（含重命名修复） ----------
   app.get("/categories", async (c) => {
     try {
       needRoles(c, ["admin"]);
@@ -260,13 +277,35 @@ export function registerProducts(app: Hono<AppEnv>) {
     try {
       const { fields } = await parseForm(c);
       const name = (fields.name || "").trim();
+      const sort = parseInt(fields.sort || "0", 10) || 0;
       if (!name) return redirectWith(c, "/categories", undefined, "分类名称不能为空");
-      await s.createCategory(name);
+      await s.createCategory(name, sort);
       await s.audit(me.id, "新增分类", "分类", `新增分类 ${name}`, clientIP(c));
       return redirectWith(c, "/categories", "分类创建成功");
     } catch (e) {
       if (e instanceof HTTPException) throw e;
       const msg = /UNIQUE/i.test((e as Error).message) ? "该分类已存在" : "创建失败：" + (e as Error).message;
+      return redirectWith(c, "/categories", undefined, msg);
+    }
+  });
+
+  // 修复原版缺失的分类重命名路由
+  app.post("/categories/:id/rename", async (c) => {
+    const me = needRoles(c, ["admin"]);
+    const s = store(c);
+    const id = parseInt(c.req.param("id") || "", 10) || 0;
+    try {
+      if (!id) return redirectWith(c, "/categories", undefined, "参数错误");
+      const { fields } = await parseForm(c);
+      const name = (fields.name || "").trim();
+      const sort = fields.sort !== undefined ? parseInt(fields.sort || "0", 10) || 0 : undefined;
+      if (!name) return redirectWith(c, "/categories", undefined, "分类名称不能为空");
+      await s.renameCategory(id, name, sort);
+      await s.audit(me.id, "编辑分类", "分类", `更新分类 #${id} 为 ${name}`, clientIP(c));
+      return redirectWith(c, "/categories", "分类已更新");
+    } catch (e) {
+      if (e instanceof HTTPException) throw e;
+      const msg = /UNIQUE/i.test((e as Error).message) ? "该分类名称已存在" : "更新失败：" + (e as Error).message;
       return redirectWith(c, "/categories", undefined, msg);
     }
   });
@@ -333,7 +372,8 @@ export function registerProducts(app: Hono<AppEnv>) {
       return redirectWith(c, "/suppliers", "供应商创建成功");
     } catch (e) {
       if (e instanceof HTTPException) throw e;
-      return redirectWith(c, "/suppliers/new", undefined, "创建失败：" + (e as Error).message);
+      const msg = /UNIQUE/i.test((e as Error).message) ? "该供应商名称已存在" : (e as Error).message;
+      return redirectWith(c, "/suppliers/new", undefined, "创建失败：" + msg);
     }
   });
 
@@ -397,9 +437,23 @@ export function registerProducts(app: Hono<AppEnv>) {
   app.get("/catalog", async (c) => {
     try {
       needRoles(c, ["admin", "sales", "customer"]);
-      const { rows } = await store(c).listProducts({ status: "on", page: 1, pageSize: 100 });
+      const s = store(c);
+      const q = (c.req.query("q") || "").trim();
+      const categoryIdQ = (c.req.query("category_id") || c.req.query("categoryId") || "").trim();
+      const categoryId = parseInt(categoryIdQ, 10) || undefined;
+      const [{ rows }, categories] = await Promise.all([
+        s.listProducts({ status: "on", q: q || undefined, categoryId, page: 1, pageSize: 100 }),
+        s.listCategories(),
+      ]);
       const ctx = pageCtx(c);
-      return c.html(layout({ title: "选购商品", ctx, active: "catalog", content: catalogPage(ctx, rows) }));
+      return c.html(
+        layout({
+          title: "选购商品",
+          ctx,
+          active: "catalog",
+          content: catalogPage(ctx, rows, { q, categories, categoryId: categoryIdQ }),
+        })
+      );
     } catch (e) {
       if (e instanceof HTTPException) throw e;
       const ctx = pageCtx(c);

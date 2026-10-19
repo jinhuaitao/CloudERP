@@ -1,129 +1,159 @@
-// 认证相关页面：初始化向导 / 登录 / 注册 / 找回密码（均为未登录居中卡片样式）
+// 认证相关页面：初始化向导 / 登录 / 注册 / 找回密码（返回纯 HTML 片段，由路由层包裹 layout）
 import { esc } from "../lib";
-import { layout, csrfInput, field, type ViewCtx } from "./layout";
+import { csrfInput, field, type ViewCtx } from "./layout";
 
 /** 密保问题字段组（初始化 / 注册共用） */
 function secQFields(): string {
   return `
-    <h3 class="mt">🔑 密保问题</h3>
-    <p class="muted small">用于找回密码，请牢记答案（答案不区分大小写）</p>
-    ${field(
-      "密保问题 1",
-      `<input type="text" name="q1" maxlength="100" required placeholder="例如：我的小学班主任是谁？">`,
-      "",
-      true
-    )}
-    ${field("答案 1", `<input type="text" name="a1" maxlength="100" required autocomplete="off">`, "", true)}
-    ${field("密保问题 2", `<input type="text" name="q2" maxlength="100" required>`, "", true)}
-    ${field("答案 2", `<input type="text" name="a2" maxlength="100" required autocomplete="off">`, "", true)}`;
+    <div class="auth-secq-box">
+      <div class="auth-secq-title">🔑 密保安全问题设置</div>
+      <p class="muted small mb">用于忘记密码时自助验证身份，答案自动忽略空格与大小写</p>
+      <div class="form-row">
+        ${field(
+          "密保问题 1",
+          `<input type="text" name="q1" maxlength="100" required value="我的出生地或家乡是哪里？" placeholder="例如：我的小学班主任是谁？">`,
+          "",
+          true
+        )}
+        ${field("问题 1 答案", `<input type="text" name="a1" minlength="2" maxlength="100" required autocomplete="off" placeholder="至少 2 个字符">`, "", true)}
+      </div>
+      <div class="form-row">
+        ${field(
+          "密保问题 2",
+          `<input type="text" name="q2" maxlength="100" required value="我最难忘的宠物或朋友名字？" placeholder="例如：我的第一份工作所在城市？">`,
+          "",
+          true
+        )}
+        ${field("问题 2 答案", `<input type="text" name="a2" minlength="2" maxlength="100" required autocomplete="off" placeholder="至少 2 个字符">`, "", true)}
+      </div>
+    </div>`;
 }
 
 /** 首次初始化向导：创建管理员账号 */
 export function setupPage(ctx: ViewCtx): string {
-  const content = `
-    <h1 class="auth-title">🎉 首次使用</h1>
-    <p class="auth-sub">欢迎使用进销通，请先创建管理员账号</p>
+  return `
+    <div class="auth-header">
+      <span class="badge blue">系统初始化向导</span>
+      <h1 class="auth-title">创建超级管理员</h1>
+      <p class="auth-sub">首次启用进销通，请设置管理员账号与密保问题（系统无默认密码）</p>
+    </div>
     <form method="post" action="/setup">
       ${csrfInput(ctx.csrf)}
-      ${field(
-        "管理员用户名",
-        `<input type="text" name="username" required minlength="3" maxlength="32" autocomplete="username" placeholder="3-32 位：字母 / 数字 / 中文 / 下划线">`,
-        "",
-        true
-      )}
-      ${field(
-        "登录密码",
-        `<input type="password" name="password" required minlength="6" maxlength="64" autocomplete="new-password" placeholder="至少 6 位">`,
-        "",
-        true
-      )}
-      ${field(
-        "确认密码",
-        `<input type="password" name="confirm_password" required minlength="6" maxlength="64" autocomplete="new-password" placeholder="再次输入密码">`,
-        "",
-        true
-      )}
-      ${field("昵称", `<input type="text" name="nickname" maxlength="32" placeholder="用于界面显示，默认为用户名">`)}
+      <div class="form-row">
+        ${field(
+          "管理员用户名",
+          `<input type="text" name="username" required minlength="3" maxlength="32" autocomplete="username" placeholder="3-32 位字母/数字/中文">`,
+          "",
+          true
+        )}
+        ${field("显示昵称", `<input type="text" name="nickname" required maxlength="32" placeholder="如：系统管理员">`, "", true)}
+      </div>
+      <div class="form-row">
+        ${field(
+          "登录密码",
+          `<input type="password" name="password" required minlength="6" maxlength="64" autocomplete="new-password" placeholder="至少 6 位字符">`,
+          "",
+          true
+        )}
+        ${field(
+          "确认密码",
+          `<input type="password" name="confirm_password" required minlength="6" maxlength="64" autocomplete="new-password" placeholder="再次输入登录密码">`,
+          "",
+          true
+        )}
+      </div>
       ${secQFields()}
-      <button class="btn primary block mt" type="submit">🚀 创建管理员并进入系统</button>
+      <button class="btn primary block mt" type="submit">🚀 完成初始化并进入系统</button>
     </form>`;
-  return layout({ title: "初始化", ctx, content });
 }
 
 /** 登录页 */
 export function loginPage(ctx: ViewCtx): string {
   const appName = esc(ctx.settings.site_name || ctx.appName || "进销通");
-  const content = `
-    <h1 class="auth-title">🔐 登录</h1>
-    <p class="auth-sub">欢迎回来，${appName}</p>
+  const allowReg = ctx.settings.allow_register !== "0";
+  return `
+    <div class="auth-header">
+      <span class="badge blue">安全认证中心</span>
+      <h1 class="auth-title">登录 ${appName}</h1>
+      <p class="auth-sub">请输入您的管理员、销售员或客户账号凭证</p>
+    </div>
     <form method="post" action="/login">
       ${csrfInput(ctx.csrf)}
       ${field(
-        "用户名",
-        `<input type="text" name="username" required maxlength="32" autocomplete="username" placeholder="请输入用户名">`,
+        "登录账号",
+        `<input type="text" name="username" required maxlength="32" autocomplete="username" placeholder="请输入用户名" autofocus>`,
         "",
         true
       )}
       ${field(
-        "密码",
-        `<input type="password" name="password" required maxlength="64" autocomplete="current-password" placeholder="请输入密码">`,
+        "登录密码",
+        `<input type="password" name="password" required maxlength="64" autocomplete="current-password" placeholder="请输入登录密码">`,
         "",
         true
       )}
-      <div class="checkbox-row mb">
-        <input type="checkbox" id="remember" name="remember" value="1">
-        <label for="remember">记住我（30 天免登录）</label>
+      <div class="auth-options-row mb">
+        <label class="checkbox-row">
+          <input type="checkbox" id="remember" name="remember" value="1">
+          <span>保持登录状态（30 天）</span>
+        </label>
+        <a href="/forgot" class="small">忘记密码？</a>
       </div>
-      <button class="btn primary block" type="submit">登录</button>
+      <button class="btn primary block" type="submit">立即登录 →</button>
     </form>
     <div class="auth-links">
-      <a href="/register">📝 注册账号</a>
-      <a href="/forgot">❓ 忘记密码</a>
+      ${allowReg ? `还没有客户账号？ <a href="/register"><strong>免费注册客户账号</strong></a>` : `<span class="muted">如需开通账号请联系企业管理员</span>`}
     </div>`;
-  return layout({ title: "登录", ctx, content });
 }
 
 /** 注册页（客户自助注册） */
 export function registerPage(ctx: ViewCtx, allow: boolean): string {
   if (!allow) {
-    const content = `
-      <h1 class="auth-title">🚫 注册已关闭</h1>
-      <p class="auth-sub">当前系统不开放自主注册，请联系管理员为您开通账号</p>
-      <a class="btn primary block" href="/login">返回登录</a>`;
-    return layout({ title: "注册", ctx, content });
+    return `
+      <div class="auth-header">
+        <span class="badge yellow">访问受限</span>
+        <h1 class="auth-title">暂未开放自助注册</h1>
+        <p class="auth-sub">当前企业已关闭自助注册通道，请联系管理员或专属销售代表为您开通账号。</p>
+      </div>
+      <a class="btn primary block" href="/login">← 返回登录页</a>`;
   }
-  const content = `
-    <h1 class="auth-title">📝 注册账号</h1>
-    <p class="auth-sub">注册后即成为客户，可浏览商品并自助下单</p>
+  return `
+    <div class="auth-header">
+      <span class="badge green">客户入驻</span>
+      <h1 class="auth-title">注册客户订货账号</h1>
+      <p class="auth-sub">注册后即可浏览实时商品画册、在线下单并查看历史账单</p>
+    </div>
     <form method="post" action="/register">
       ${csrfInput(ctx.csrf)}
-      ${field(
-        "用户名",
-        `<input type="text" name="username" required minlength="3" maxlength="32" autocomplete="username" placeholder="3-32 位：字母 / 数字 / 中文 / 下划线">`,
-        "",
-        true
-      )}
-      ${field(
-        "密码",
-        `<input type="password" name="password" required minlength="6" maxlength="64" autocomplete="new-password" placeholder="至少 6 位">`,
-        "",
-        true
-      )}
-      ${field(
-        "确认密码",
-        `<input type="password" name="confirm_password" required minlength="6" maxlength="64" autocomplete="new-password">`,
-        "",
-        true
-      )}
-      ${field("昵称", `<input type="text" name="nickname" maxlength="32" placeholder="用于界面显示">`)}
-      ${field("手机号", `<input type="tel" name="phone" maxlength="20" autocomplete="tel" placeholder="选填，方便商家联系">`)}
+      <div class="form-row">
+        ${field(
+          "用户名",
+          `<input type="text" name="username" required minlength="3" maxlength="32" autocomplete="username" placeholder="3-32 位字母/数字/中文">`,
+          "",
+          true
+        )}
+        ${field("客户名称 / 昵称", `<input type="text" name="nickname" required maxlength="32" placeholder="公司名或您的称呼">`, "", true)}
+      </div>
+      <div class="form-row">
+        ${field(
+          "设置密码",
+          `<input type="password" name="password" required minlength="6" maxlength="64" autocomplete="new-password" placeholder="至少 6 位">`,
+          "",
+          true
+        )}
+        ${field(
+          "确认密码",
+          `<input type="password" name="confirm_password" required minlength="6" maxlength="64" autocomplete="new-password" placeholder="再次输入密码">`,
+          "",
+          true
+        )}
+      </div>
+      ${field("联系电话", `<input type="tel" name="phone" maxlength="20" autocomplete="tel" placeholder="选填，便于发货与对账联系">`)}
       ${secQFields()}
-      <button class="btn primary block mt" type="submit">✅ 注册</button>
+      <button class="btn primary block mt" type="submit">✅ 提交注册</button>
     </form>
     <div class="auth-links">
-      <a href="/login">已有账号？去登录</a>
+      已有账号？ <a href="/login"><strong>返回登录</strong></a>
     </div>`;
-  return layout({ title: "注册", ctx, content });
 }
 
 /** 找回密码：三阶段向导 */
@@ -135,40 +165,51 @@ export function forgotPage(
   let body = "";
   if (stage === "username") {
     body = `
-      <h1 class="auth-title">❓ 找回密码</h1>
-      <p class="auth-sub">第一步：请输入您的用户名</p>
+      <div class="auth-header">
+        <span class="badge yellow">步骤 1 / 2</span>
+        <h1 class="auth-title">密保找回密码</h1>
+        <p class="auth-sub">请输入您需要找回密码的用户名以读取密保问题</p>
+      </div>
       <form method="post" action="/forgot">
         ${csrfInput(ctx.csrf)}
         ${field(
           "用户名",
-          `<input type="text" name="username" required maxlength="32" autocomplete="username" placeholder="请输入注册时的用户名">`,
+          `<input type="text" name="username" required maxlength="32" autocomplete="username" placeholder="请输入注册时的用户名" autofocus>`,
           "",
           true
         )}
-        <button class="btn primary block" type="submit">下一步</button>
+        <button class="btn primary block" type="submit">下一步：验证密保 →</button>
       </form>`;
   } else if (stage === "questions") {
     body = `
-      <h1 class="auth-title">🔑 身份验证</h1>
-      <p class="auth-sub">请回答您设置的两道密保问题</p>
+      <div class="auth-header">
+        <span class="badge blue">步骤 2 / 2</span>
+        <h1 class="auth-title">回答密保问题</h1>
+        <p class="auth-sub">正在验证账号 <strong>@${esc(d?.username || "")}</strong> 的密保信息</p>
+      </div>
       <form method="post" action="/forgot/verify">
         ${csrfInput(ctx.csrf)}
         <input type="hidden" name="username" value="${esc(d?.username || "")}">
-        <div class="field"><label>问题 1</label><p><strong>${esc(d?.q1 || "")}</strong></p>
-          <input type="text" name="a1" required maxlength="100" autocomplete="off" placeholder="请输入答案 1">
+        <div class="field">
+          <label>密保问题 1</label>
+          <div class="secq-prompt">${esc(d?.q1 || "")}</div>
+          <input type="text" name="a1" required maxlength="100" autocomplete="off" placeholder="请输入问题 1 的答案" autofocus>
         </div>
-        <div class="field"><label>问题 2</label><p><strong>${esc(d?.q2 || "")}</strong></p>
-          <input type="text" name="a2" required maxlength="100" autocomplete="off" placeholder="请输入答案 2">
+        <div class="field">
+          <label>密保问题 2</label>
+          <div class="secq-prompt">${esc(d?.q2 || "")}</div>
+          <input type="text" name="a2" required maxlength="100" autocomplete="off" placeholder="请输入问题 2 的答案">
         </div>
-        <button class="btn primary block" type="submit">验证</button>
+        <button class="btn primary block" type="submit">✅ 验证并登录重置密码</button>
       </form>`;
   } else {
     body = `
-      <h1 class="auth-title">✅ 验证通过</h1>
-      <p class="auth-sub">身份验证通过，已为你自动登录<br>请尽快前往个人中心修改密码，并妥善保管密保答案</p>
-      <a class="btn primary block" href="/profile/password">🔒 去修改密码</a>
-      <div class="auth-links"><a href="/dashboard">直接进入系统</a></div>`;
+      <div class="auth-header">
+        <span class="badge green">验证通过</span>
+        <h1 class="auth-title">身份验证成功</h1>
+        <p class="auth-sub">已为您建立临时安全会话，请立即前往设置新密码</p>
+      </div>
+      <a class="btn primary block" href="/profile/password">🔒 立即修改密码</a>`;
   }
-  const content = `${body}<div class="auth-links"><a href="/login">返回登录</a></div>`;
-  return layout({ title: "找回密码", ctx, content });
+  return `${body}<div class="auth-links"><a href="/login">← 返回登录页面</a></div>`;
 }

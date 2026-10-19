@@ -4,7 +4,7 @@ import { HTTPException } from "hono/http-exception";
 import { Store, ensureSchema } from "./db";
 import { sha256hex } from "./lib";
 import { toSafeUser, type AppEnv, type Env } from "./env";
-import { layout, errorPage } from "./views/layout";
+import { errorPage } from "./views/layout";
 import { registerSetupAuth } from "./routes/setup-auth";
 import { registerDashboard } from "./routes/dashboard";
 import { registerProducts } from "./routes/products";
@@ -23,21 +23,29 @@ app.use("*", async (c, next) => {
   h.set("Referrer-Policy", "strict-origin-when-cross-origin");
   h.set(
     "Content-Security-Policy",
-    "default-src 'self'; img-src 'self' data: blob:; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+    "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
   );
 });
 
-// ---------- 上下文准备：建表自愈 + 设置 + 会话认证 + CSRF 令牌 ----------
+// ---------- 上下文准备：建表自愈 + 设置 + 会话认证 + CSRF 令牌 + 预警计数 ----------
 function getCookie(cookie: string, name: string): string | null {
   const m = cookie.match(new RegExp("(?:^|;\\s*)" + name + "=([a-f0-9]{64})"));
   return m ? m[1] : null;
 }
 
 app.use("*", async (c, next) => {
+  const path = new URL(c.req.url).pathname;
+  const isAsset = path.startsWith("/static/") || path === "/favicon.ico" || path === "/favicon.svg";
+  if (isAsset) {
+    await next();
+    return;
+  }
+
   const store = new Store(c.env.DB);
   await ensureSchema(c.env.DB);
   const settings = await store.getSettings().catch(() => ({}));
   c.set("settings", settings);
+  c.set("lowStockCount", 0);
 
   // 会话认证：cookie 里是原始 token，库里存的是其 SHA-256 摘要
   const cookie = c.req.header("cookie") || "";
@@ -49,6 +57,11 @@ app.use("*", async (c, next) => {
     if (s) user = toSafeUser(s.user);
   }
   c.set("user", user);
+
+  if (user && (user.role === "admin" || user.role === "sales")) {
+    const lowCount = await store.countLowStock().catch(() => 0);
+    c.set("lowStockCount", lowCount);
+  }
 
   // CSRF 双重提交令牌
   let csrf = getCookie(cookie, "csrf_token");
@@ -62,11 +75,9 @@ app.use("*", async (c, next) => {
   c.set("csrfToken", csrf);
 
   // 未初始化时强制进入设置向导（静态资源与公开路径除外）
-  const path = new URL(c.req.url).pathname;
-  const isAsset = path.startsWith("/static/") || path === "/favicon.ico" || path === "/favicon.svg";
   const publicPaths = ["/setup", "/login", "/register", "/forgot", "/healthz"];
   const isPublic = publicPaths.some((p) => path === p || path.startsWith(p + "/"));
-  if (!isAsset && !isPublic) {
+  if (!isPublic) {
     const admins = await store.countAdmins().catch(() => 1);
     if (admins === 0) return c.redirect("/setup", 302);
   }
@@ -80,7 +91,7 @@ app.use("*", async (c, next) => {
 });
 
 // ---------- 路由挂载 ----------
-app.get("/healthz", (c) => c.json({ status: "ok", time: new Date().toISOString() }));
+app.get("/healthz", (c) => c.json({ status: "ok", version: "2.0.0", time: new Date().toISOString() }));
 
 registerSetupAuth(app);
 registerDashboard(app);
@@ -91,31 +102,32 @@ registerSystem(app);
 
 // ---------- 错误处理 ----------
 app.onError((err, c) => {
-  // HTTPException（鉴权跳转 / 403 / CSRF 拦截）直接返回其携带的 Response
   if (err instanceof HTTPException) return err.getResponse();
   console.error("Unhandled error:", err);
+  const settings = c.get("settings") || {};
   const ctx = {
     user: c.get("user") || null,
     csrf: c.get("csrfToken") || "",
-    settings: c.get("settings") || {},
-    appName: "进销通",
+    settings,
+    appName: settings.site_name || "进销通",
+    lowStockCount: c.get("lowStockCount") || 0,
   };
   return c.html(errorPage(ctx, 500, "出错了", "服务器内部错误，请稍后再试。"), 500);
 });
 
 app.notFound((c) => {
+  const settings = c.get("settings") || {};
   const ctx = {
     user: c.get("user") || null,
     csrf: c.get("csrfToken") || "",
-    settings: c.get("settings") || {},
-    appName: "进销通",
+    settings,
+    appName: settings.site_name || "进销通",
+    lowStockCount: c.get("lowStockCount") || 0,
   };
   return c.html(errorPage(ctx, 404, "页面不存在", "你访问的页面不存在或已被移动。"), 404);
 });
 
 // ---------- 定时任务 ----------
-// "0 * * * *": 清理过期会话与陈旧登录记录
-// "0 3 * * *": 自动备份全量数据到 R2 并按保留份数轮转
 async function scheduled(event: ScheduledEvent, env: Env) {
   const store = new Store(env.DB);
   await ensureSchema(env.DB);

@@ -1,7 +1,6 @@
-// 经营报表 / 用户管理 / 个人中心 / 系统设置 / 数据维护 / 操作日志
-import { esc, money, fmtDT } from "../lib";
+// 经营报表 / 用户管理 / 个人中心 / 系统设置 / 数据维护 / 操作日志（返回纯 HTML 片段，由路由层包裹 layout）
+import { esc, money, fmtDT, round2 } from "../lib";
 import {
-  layout,
   pageHead,
   statCard,
   badge,
@@ -35,52 +34,70 @@ export interface ReportData {
   to: string;
   purchaseTotal: number;
   salesTotal: number;
+  salesPaid?: number;
   profit: number;
   returnTotal: number;
+  commissionTotal?: number;
   orderCount: number;
 }
 
 export function reportPage(ctx: ViewCtx, d: ReportData): string {
   const q = `from=${encodeURIComponent(d.from)}&to=${encodeURIComponent(d.to)}`;
+  const salesPaid = d.salesPaid ?? d.salesTotal;
+  const unpaid = round2(Math.max(0, d.salesTotal - salesPaid));
+  const marginPct = d.salesTotal > 0 ? ((d.profit / d.salesTotal) * 100).toFixed(1) + "%" : "0.0%";
+  const netProfit = round2(d.profit - (d.commissionTotal || 0));
+
   const exports = [
-    { t: "sales", label: "📤 导出销售明细" },
-    { t: "purchase", label: "📥 导出进货明细" },
-    { t: "movements", label: "🧾 导出库存流水" },
-    { t: "products", label: "📦 导出商品清单" },
+    { t: "sales", label: "📤 导出销售单明细 (.csv)" },
+    { t: "purchase", label: "📥 导出进货单明细 (.csv)" },
+    { t: "movements", label: "🧾 导出库存流水台账 (.csv)" },
+    { t: "products", label: "📦 导出全量商品库存表 (.csv)" },
   ]
     .map((e) => `<a class="btn secondary" href="/reports/export?type=${e.t}&${q}">${e.label}</a>`)
     .join("");
 
-  const content = `
-    ${pageHead("📈 经营报表", "按日期区间统计进销存经营数据")}
+  return `
+    ${pageHead("📈 财务与经营汇总报表", `核算区间：${d.from} 至 ${d.to}（东八区标准时间）`)}
     <form class="toolbar" method="get" action="/reports">
+      <label class="muted">起始日期：</label>
       <input type="date" name="from" value="${esc(d.from)}">
       <span class="muted">至</span>
       <input type="date" name="to" value="${esc(d.to)}">
-      <button class="btn secondary" type="submit">查询</button>
+      <button class="btn primary" type="submit">📊 重新统计</button>
     </form>
     <div class="grid cols-4 mb">
-      ${statCard("📥", "进货总额", money(d.purchaseTotal), `${esc(d.from)} ~ ${esc(d.to)}`, "blue")}
-      ${statCard("📤", "销售总额", money(d.salesTotal), `${d.orderCount} 笔订单`, "green")}
-      ${statCard("📈", "毛利润", money(d.profit), "销售额 - 销售成本", "yellow")}
-      ${statCard("↩️", "退货总额", money(d.returnTotal), "", "red")}
+      ${statCard("📤", "区间销售总额", money(d.salesTotal), `共成交 ${d.orderCount} 笔有效销售单`, "green")}
+      ${statCard("✅", "销售实收回款", money(salesPaid), unpaid > 0 ? `区间新增挂账 ${money(unpaid)}` : "区间订单100%回款", "blue")}
+      ${statCard("📈", "销售毛利润", money(d.profit), `扣减折扣后毛利率 ${marginPct}`, "yellow")}
+      ${statCard("💎", "扣除佣金后净毛利", money(netProfit), `区间计提分销佣金 ${money(d.commissionTotal || 0)}`, "purple")}
     </div>
-    <div class="card"><h3>📥 数据导出（CSV，Excel 可直接打开）</h3>
+    <div class="grid cols-2 mb">
+      ${statCard("📥", "区间采购进货总额", money(d.purchaseTotal), "已完成入库的采购单合计", "blue")}
+      ${statCard("↩️", "区间销售退货总额", money(d.returnTotal), "已完成退货入库的冲销总额", "red")}
+    </div>
+    <div class="card">
+      <h3>📥 财务数据报表导出（含 UTF-8 BOM 头，Excel 直接打开不乱码）</h3>
+      <p class="muted small mb">所有导出文件已内置 CSV 公式注入防护，日期范围与上方所选统计周期保持一致。</p>
       <div class="btn-row">${exports}</div>
-      <p class="muted small mt">导出范围与上方查询的日期区间一致。</p>
     </div>`;
-
-  return layout({ title: "经营报表", ctx, active: "reports", content });
 }
 
 // ================= 用户管理 =================
 
 export function userListPage(
   ctx: ViewCtx,
-  d: { rows: User[]; total: number; page: number; pageSize: number; q: string }
+  d: { rows: User[]; total: number; page: number; pageSize: number; q: string; role?: string }
 ): string {
   const roleBadge = (r: string): string =>
     r === "admin" ? badge(roleName(r), "blue") : r === "sales" ? badge(roleName(r), "green") : badge(roleName(r), "gray");
+
+  const roleOptions = [
+    `<option value="">全部角色</option>`,
+    `<option value="admin"${d.role === "admin" ? " selected" : ""}>管理员</option>`,
+    `<option value="sales"${d.role === "sales" ? " selected" : ""}>销售员</option>`,
+    `<option value="customer"${d.role === "customer" ? " selected" : ""}>客户</option>`,
+  ].join("");
 
   const rows =
     d.rows.length > 0
@@ -88,46 +105,56 @@ export function userListPage(
           .map((u) => {
             const isSelf = ctx.user?.id === u.id;
             return `<tr>
-              <td>${esc(u.username)}</td>
-              <td><strong>${esc(u.nickname)}</strong></td>
+              <td><strong>${esc(u.username)}</strong></td>
+              <td>${esc(u.nickname)}</td>
               <td>${roleBadge(u.role)}</td>
-              <td>${u.role === "sales" ? (u.sales_level === 2 ? "二级" : "一级") : "—"}</td>
+              <td>${
+                u.role === "sales"
+                  ? u.sales_level === 2
+                    ? badge("二级销售", "yellow")
+                    : badge("一级主管", "blue")
+                  : u.role === "customer" && u.credit_limit > 0
+                    ? `<span class="small muted">授信 ${money(u.credit_limit)}</span>`
+                    : "—"
+              }</td>
               <td>${esc(u.phone || "—")}</td>
               <td>${statusBadge(u.status)}</td>
               <td><div class="btn-row">
                 <a class="btn small secondary" href="/users/${u.id}/edit">编辑</a>
                 ${
                   isSelf
-                    ? `<span class="muted small">（自己）</span>`
-                    : `<form class="inline-form" method="post" action="/users/${u.id}/toggle" data-confirm="确定${u.status === "active" ? "禁用" : "启用"}用户「${esc(u.username)}」吗？">${csrfInput(ctx.csrf)}<button class="btn small secondary" type="submit">${u.status === "active" ? "禁用" : "启用"}</button></form>`
+                    ? `<span class="badge gray">当前账号</span>`
+                    : `<form class="inline-form" method="post" action="/users/${u.id}/toggle" data-confirm="确定${
+                        u.status === "active" ? "禁用" : "启用"
+                      }用户「${esc(u.username)}」吗？">${csrfInput(ctx.csrf)}<button class="btn small ${
+                        u.status === "active" ? "danger" : "success"
+                      }" type="submit">${u.status === "active" ? "禁用" : "启用"}</button></form>`
                 }
-                <form class="inline-form" method="post" action="/users/${u.id}/reset-password">
+                <form class="inline-edit-form" method="post" action="/users/${u.id}/reset-password">
                   ${csrfInput(ctx.csrf)}
-                  <input type="password" name="new_password" required minlength="6" maxlength="64" placeholder="新密码" autocomplete="new-password">
+                  <input type="password" name="new_password" required minlength="6" maxlength="64" placeholder="输入新密码(≥6位)" autocomplete="new-password" style="width:135px">
                   <button class="btn small secondary" type="submit">重置密码</button>
                 </form>
               </div></td>
             </tr>`;
           })
           .join("")
-      : emptyRow(7, "暂无用户");
+      : emptyRow(7, "暂无符合条件的用户");
 
-  const content = `
-    ${pageHead("👤 用户管理", `共 ${d.total} 个用户`, `<a class="btn primary" href="/users/new">＋ 新建用户</a>`)}
+  return `
+    ${pageHead("👤 系统用户与权限管理", `共 ${d.total} 个账户 · 支持管理员、一/二级销售员与客户分级管控`, `<a class="btn primary" href="/users/new">＋ 新建用户</a>`)}
     <form class="toolbar" method="get" action="/users">
-      <input type="text" name="q" value="${esc(d.q)}" placeholder="🔍 用户名 / 昵称 / 电话" maxlength="64">
-      <button class="btn secondary" type="submit">搜索</button>
-      ${d.q ? `<a class="btn secondary" href="/users">清除</a>` : ""}
+      <input type="text" name="q" value="${esc(d.q)}" placeholder="🔍 搜索用户名 / 昵称 / 电话..." maxlength="64" class="grow">
+      <select name="role">${roleOptions}</select>
+      <button class="btn primary" type="submit">搜索</button>
+      ${d.q || d.role ? `<a class="btn secondary" href="/users">重置</a>` : ""}
     </form>
     <div class="card"><div class="table-wrap"><table class="table">
-      <thead><tr><th>用户名</th><th>昵称</th><th>角色</th><th>销售级别</th><th>电话</th><th>状态</th><th>操作</th></tr></thead>
+      <thead><tr><th>用户名</th><th>昵称 / 名称</th><th>系统角色</th><th>级别 / 授信</th><th>电话</th><th>状态</th><th>管理操作</th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>
-    ${pagerHtml("/users", { q: d.q }, d.page, tp(d.total, d.pageSize))}
-    </div>
-    <p class="muted small">💡 重置密码：在输入框填写新密码后点击「重置密码」即可生效，用户下次登录需使用新密码。</p>`;
-
-  return layout({ title: "用户管理", ctx, active: "users", content });
+    ${pagerHtml("/users", { q: d.q, role: d.role || "" }, d.page, tp(d.total, d.pageSize))}
+    </div>`;
 }
 
 export interface UserFormData {
@@ -140,74 +167,80 @@ export function userFormPage(ctx: ViewCtx, d: UserFormData): string {
   const isNew = !u;
   const action = isNew ? "/users" : `/users/${u!.id}`;
   const v = (x: unknown): string => esc(x ?? "");
-  // 上级候选：排除自己
   const parents = d.salesTeam.filter((p) => !u || p.id !== u.id);
 
-  const content = `
-    ${pageHead(isNew ? "＋ 新建用户" : "✏️ 编辑用户", u ? `@${u.username}` : "填写用户资料", `<a class="btn secondary" href="/users">← 返回列表</a>`)}
+  return `
+    ${pageHead(isNew ? "＋ 新建系统用户" : "✏️ 编辑用户权限与资料", u ? `@${u.username}（${roleName(u.role)}）` : "配置用户角色、分销层级或客户授信额度", `<a class="btn secondary" href="/users">← 返回用户列表</a>`)}
     <div class="card">
       <form method="post" action="${action}">
         ${csrfInput(ctx.csrf)}
-        ${
-          isNew
-            ? field("用户名", `<input type="text" name="username" required minlength="3" maxlength="32" autocomplete="off">`, "", true)
-            : field("用户名", `<input type="text" value="${v(u!.username)}" disabled>`, "用户名创建后不可修改")
-        }
-        ${field(
-          "密码",
-          `<input type="password" name="password" ${isNew ? "required" : ""} minlength="6" maxlength="64" autocomplete="new-password" placeholder="${isNew ? "至少 6 位" : "留空则不修改"}">`,
-          isNew ? "" : "留空表示不修改密码",
-          isNew
-        )}
         <div class="form-row">
-          ${field("昵称", `<input type="text" name="nickname" maxlength="32" value="${v(u?.nickname)}">`)}
-          ${field("电话", `<input type="tel" name="phone" maxlength="20" value="${v(u?.phone)}">`)}
+          ${
+            isNew
+              ? field("登录用户名", `<input type="text" name="username" required minlength="3" maxlength="32" autocomplete="off" placeholder="3-32 位字符">`, "", true)
+              : field("登录用户名", `<input type="text" value="${v(u!.username)}" disabled>`, "用户名创建后不可更改")
+          }
+          ${field(
+            "登录密码",
+            `<input type="password" name="password" ${isNew ? "required" : ""} minlength="6" maxlength="64" autocomplete="new-password" placeholder="${isNew ? "至少 6 位" : "留空则保持原密码不变"}">`,
+            isNew ? "" : "修改密码后将自动强制该用户所有已登录设备重新登录",
+            isNew
+          )}
         </div>
-        ${field("邮箱", `<input type="email" name="email" maxlength="100" value="${v(u?.email)}">`)}
+        <div class="form-row cols-3">
+          ${field("显示昵称 / 客户名", `<input type="text" name="nickname" maxlength="32" value="${v(u?.nickname)}" required>`, "", true)}
+          ${field("联系电话", `<input type="tel" name="phone" maxlength="20" value="${v(u?.phone)}">`)}
+          ${field("电子邮箱", `<input type="email" name="email" maxlength="100" value="${v(u?.email)}">`)}
+        </div>
         <div class="form-row">
           ${field(
-            "角色",
+            "系统角色",
             `<select id="roleSelect" name="role">
-              <option value="admin"${u?.role === "admin" ? " selected" : ""}>管理员</option>
-              <option value="sales"${!u || u?.role === "sales" ? " selected" : ""}>销售员</option>
-              <option value="customer"${u?.role === "customer" ? " selected" : ""}>客户</option>
+              <option value="admin"${u?.role === "admin" ? " selected" : ""}>管理员（全权管理）</option>
+              <option value="sales"${!u || u?.role === "sales" ? " selected" : ""}>销售员（开单/分销/客户）</option>
+              <option value="customer"${u?.role === "customer" ? " selected" : ""}>客户（浏览画册/自助订货）</option>
             </select>`,
             "",
             true
           )}
           ${field(
-            "状态",
+            "账号状态",
             `<select name="status">
-              <option value="active"${!u || u?.status === "active" ? " selected" : ""}>正常</option>
-              <option value="disabled"${u?.status === "disabled" ? " selected" : ""}>禁用</option>
+              <option value="active"${!u || u?.status === "active" ? " selected" : ""}>正常启用</option>
+              <option value="disabled"${u?.status === "disabled" ? " selected" : ""}>禁用封停（立即踢出所有会话）</option>
             </select>`
           )}
         </div>
-        <div data-show-for="sales">
-          <h3 class="mt">💼 销售设置 <span class="muted small">（角色为销售员时生效）</span></h3>
+        <div data-show-for="sales" class="role-extra-panel">
+          <h3>💼 二级分销体系配置 <span class="muted small">（仅当角色为「销售员」时生效）</span></h3>
           <div class="form-row">
             ${field(
-              "销售级别",
+              "销售层级",
               `<select name="sales_level" data-role="sales-level">
-                <option value="1"${!u || u?.sales_level !== 2 ? " selected" : ""}>一级销售</option>
-                <option value="2"${u?.sales_level === 2 ? " selected" : ""}>二级销售</option>
+                <option value="1"${!u || u?.sales_level !== 2 ? " selected" : ""}>一级分销主管（可发展下级）</option>
+                <option value="2"${u?.sales_level === 2 ? " selected" : ""}>二级分销员（需绑定一级上级）</option>
               </select>`
             )}
-            ${field("分佣比例（%）", `<input type="number" name="commission_rate" min="0" max="100" step="0.01" value="${v(u?.commission_rate || "")}" placeholder="留空用系统默认">`)}
+            ${field("个人专属分佣比例（%）", `<input type="number" name="commission_rate" min="0" max="100" step="0.01" value="${v(u?.commission_rate || "")}" placeholder="0 或留空表示使用系统默认比例">`)}
           </div>
           <div id="parentRow">
             ${field(
-              "上级销售",
-              `<select name="parent_id"><option value="">— 无（顶级） —</option>${parents
-                .map((p) => `<option value="${p.id}"${u?.parent_id === p.id ? " selected" : ""}>${esc(p.nickname)}（${esc(p.username)}）</option>`)
+              "直属上级（一级销售主管）",
+              `<select name="parent_id"><option value="">— 请选择上级一级销售 —</option>${parents
+                .map(
+                  (p) =>
+                    `<option value="${p.id}"${u?.parent_id === p.id ? " selected" : ""}>${esc(p.nickname)}（@${esc(
+                      p.username
+                    )}）</option>`
+                )
                 .join("")}</select>`,
-              "二级销售需指定上级；上级可获得管理津贴"
+              "二级销售出单时，其绑定的上级自动获得管理津贴"
             )}
           </div>
         </div>
-        <div data-show-for="customer">
-          <h3 class="mt">🧾 客户设置 <span class="muted small">（角色为客户时生效）</span></h3>
-          ${field("赊账额度（元）", `<input type="number" name="credit_limit" min="0" step="0.01" value="${v(u?.credit_limit ?? 0)}">`, "允许该客户的最大欠款金额，0 表示不赊账")}
+        <div data-show-for="customer" class="role-extra-panel">
+          <h3>🧾 客户授信风控配置 <span class="muted small">（仅当角色为「客户」时生效）</span></h3>
+          ${field("最大允许赊账额度（元）", `<input type="number" name="credit_limit" min="0" step="0.01" value="${v(u?.credit_limit ?? 0)}">`, "当客户累计未结清欠款超过此额度时，系统将自动拦截新的赊销/未付清订单（0 表示不限制或按需控制）")}
         </div>
         <div class="btn-row mt">
           <button class="btn primary" type="submit">${isNew ? "✅ 创建用户" : "💾 保存修改"}</button>
@@ -215,8 +248,6 @@ export function userFormPage(ctx: ViewCtx, d: UserFormData): string {
         </div>
       </form>
     </div>`;
-
-  return layout({ title: isNew ? "新建用户" : "编辑用户", ctx, active: "users", content });
 }
 
 // ================= 个人中心 =================
@@ -234,6 +265,7 @@ export function profilePage(
   d: { user: User; sessions: SessionInfo[]; currentDigest: string; hasSecQ: boolean }
 ): string {
   const u = d.user;
+  const otherSessionsCount = d.sessions.filter((s) => s.id !== d.currentDigest).length;
   const sessions =
     d.sessions.length > 0
       ? d.sessions
@@ -242,125 +274,134 @@ export function profilePage(
             return `<tr>
               <td class="muted small">${fmtDT(s.created_at)}</td>
               <td class="muted small">${fmtDT(s.expires_at)}</td>
-              <td>${esc(s.ip)}</td>
+              <td><code>${esc(s.ip)}</code></td>
               <td class="muted small">${esc(s.ua.slice(0, 80))}</td>
-              <td>${isCur ? badge("当前设备", "green") : `<span class="muted">—</span>`}</td>
+              <td>${isCur ? badge("当前在线设备", "green") : badge("其他设备", "blue")}</td>
               <td>${
                 isCur
-                  ? `<span class="muted small">—</span>`
-                  : `<form class="inline-form" method="post" action="/profile/sessions/${esc(s.id)}/revoke" data-confirm="确定踢出该登录设备吗？对方将立即下线。">${csrfInput(ctx.csrf)}<button class="btn small danger" type="submit">踢出</button></form>`
+                  ? `<span class="muted small">本机会话</span>`
+                  : `<form class="inline-form" method="post" action="/profile/sessions/${esc(s.id)}/revoke" data-confirm="确定强制下线该登录设备吗？">${csrfInput(ctx.csrf)}<button class="btn small danger" type="submit">强制踢出</button></form>`
               }</td>
             </tr>`;
           })
           .join("")
-      : emptyRow(6, "暂无登录记录");
+      : emptyRow(6, "暂无活跃登录设备");
 
-  const content = `
-    ${pageHead("🙋 个人中心", `@${esc(u.username)} · ${esc(roleName(u.role))}`)}
+  return `
+    ${pageHead("🛡️ 个人中心与账号安全", `当前登录：@${u.username}（${roleName(u.role)}）`)}
     <div class="grid cols-2">
-      <div class="card"><h3>📝 基本信息</h3>
+      <div class="card"><h3>📝 个人基础资料</h3>
         <form method="post" action="/profile">
           ${csrfInput(ctx.csrf)}
-          ${field("昵称", `<input type="text" name="nickname" maxlength="32" value="${esc(u.nickname)}">`, "", true)}
-          ${field("电话", `<input type="tel" name="phone" maxlength="20" value="${esc(u.phone)}">`)}
-          ${field("邮箱", `<input type="email" name="email" maxlength="100" value="${esc(u.email)}">`)}
-          <button class="btn primary" type="submit">💾 保存</button>
+          ${field("显示昵称", `<input type="text" name="nickname" maxlength="32" value="${esc(u.nickname)}" required>`, "", true)}
+          ${field("联系电话", `<input type="tel" name="phone" maxlength="20" value="${esc(u.phone)}">`)}
+          ${field("电子邮箱", `<input type="email" name="email" maxlength="100" value="${esc(u.email)}">`)}
+          <button class="btn primary" type="submit">💾 保存个人资料</button>
         </form>
       </div>
       <div>
-        <div class="card"><h3>🔒 安全设置</h3>
+        <div class="card"><h3>🔒 登录凭证与密保防护</h3>
           <dl class="kv">
-            <dt>登录密码</dt><dd><a class="btn small secondary" href="/profile/password">修改密码</a></dd>
-            <dt>密保问题</dt><dd>${d.hasSecQ ? badge("已设置", "green") : badge("未设置", "yellow")}
-              <a class="btn small secondary" href="/profile/security">${d.hasSecQ ? "更新密保" : "去设置"}</a></dd>
+            <dt>账号角色</dt><dd>${badge(roleName(u.role), "blue")}</dd>
+            <dt>登录密码</dt><dd><a class="btn small secondary" href="/profile/password">🔑 修改登录密码</a></dd>
+            <dt>密保找回</dt><dd>${d.hasSecQ ? badge("已配置密保", "green") : badge("未配置密保", "yellow")}
+              <a class="btn small secondary" href="/profile/security">${d.hasSecQ ? "更新密保问题" : "立即设置"}</a></dd>
           </dl>
-          <p class="muted small mt">💡 密保问题用于忘记密码时验证身份，建议设置并牢记答案。</p>
+          <p class="muted small mt">💡 修改密码后系统会自动注销除本机以外的所有其他登录设备会话。</p>
         </div>
       </div>
     </div>
-    <div class="card"><h3>📱 登录设备 <span class="muted small">（发现陌生设备可将其踢出）</span></h3>
+    <div class="card">
+      <div class="card-head">
+        <h3>📱 活跃登录设备管理 <span class="muted small">（共 ${d.sessions.length} 台设备在线）</span></h3>
+        ${
+          otherSessionsCount > 0
+            ? `<form class="inline-form" method="post" action="/profile/sessions/revoke-others" data-confirm="确定一键注销除本机以外的其他 ${otherSessionsCount} 台登录设备吗？">
+                ${csrfInput(ctx.csrf)}
+                <button class="btn small danger" type="submit">🚫 一键踢出其他全部设备 (${otherSessionsCount})</button>
+              </form>`
+            : ""
+        }
+      </div>
       <div class="table-wrap"><table class="table">
-        <thead><tr><th>登录时间</th><th>过期时间</th><th>IP</th><th>设备</th><th>状态</th><th>操作</th></tr></thead>
+        <thead><tr><th>登录时间</th><th>有效期至</th><th>来源 IP</th><th>浏览器 / 终端标识</th><th>状态</th><th>操作</th></tr></thead>
         <tbody>${sessions}</tbody>
       </table></div>
     </div>`;
-
-  return layout({ title: "个人中心", ctx, content });
 }
 
 export function passwordFormPage(ctx: ViewCtx): string {
-  const content = `
-    ${pageHead("🔒 修改密码", "修改后请使用新密码登录", `<a class="btn secondary" href="/profile">← 返回个人中心</a>`)}
-    <div class="card">
+  return `
+    ${pageHead("🔒 修改登录密码", "修改成功后其他设备上的登录会话将自动失效", `<a class="btn secondary" href="/profile">← 返回个人中心</a>`)}
+    <div class="card" style="max-width:560px">
       <form method="post" action="/profile/password">
         ${csrfInput(ctx.csrf)}
-        ${field("原密码", `<input type="password" name="old_password" required maxlength="64" autocomplete="current-password">`, "", true)}
-        ${field("新密码", `<input type="password" name="new_password" required minlength="6" maxlength="64" autocomplete="new-password" placeholder="至少 6 位">`, "", true)}
-        ${field("确认新密码", `<input type="password" name="confirm_password" required minlength="6" maxlength="64" autocomplete="new-password">`, "", true)}
-        <button class="btn primary" type="submit">✅ 确认修改</button>
+        ${field("当前原密码", `<input type="password" name="old_password" required maxlength="64" autocomplete="current-password" placeholder="请输入当前使用的密码">`, "", true)}
+        ${field("设置新密码", `<input type="password" name="new_password" required minlength="6" maxlength="64" autocomplete="new-password" placeholder="至少 6 位字符">`, "", true)}
+        ${field("确认新密码", `<input type="password" name="confirm_password" required minlength="6" maxlength="64" autocomplete="new-password" placeholder="再次输入新密码">`, "", true)}
+        <div class="btn-row mt">
+          <button class="btn primary" type="submit">✅ 确认修改密码</button>
+          <a class="btn secondary" href="/profile">取消</a>
+        </div>
       </form>
     </div>`;
-
-  return layout({ title: "修改密码", ctx, content });
 }
 
 export function securityFormPage(ctx: ViewCtx, has: boolean): string {
-  const content = `
-    ${pageHead("🔑 密保问题", has ? "更新将覆盖原有密保问题" : "设置两道密保问题，用于找回密码", `<a class="btn secondary" href="/profile">← 返回个人中心</a>`)}
-    <div class="card">
+  return `
+    ${pageHead("🔑 密保问题设置", has ? "提交后将覆盖您原有的密保问题与答案" : "设置两道密保问题，用于忘记密码时自助验证身份", `<a class="btn secondary" href="/profile">← 返回个人中心</a>`)}
+    <div class="card" style="max-width:620px">
       <form method="post" action="/profile/security">
         ${csrfInput(ctx.csrf)}
-        ${field("密保问题 1", `<input type="text" name="q1" required maxlength="100" placeholder="例如：我的小学班主任是谁？">`, "", true)}
-        ${field("答案 1", `<input type="text" name="a1" required maxlength="100" autocomplete="off">`, "答案不区分大小写", true)}
-        ${field("密保问题 2", `<input type="text" name="q2" required maxlength="100">`, "", true)}
-        ${field("答案 2", `<input type="text" name="a2" required maxlength="100" autocomplete="off">`, "答案不区分大小写", true)}
-        <button class="btn primary" type="submit">${has ? "🔄 更新密保" : "✅ 设置密保"}</button>
+        ${field("密保问题 1", `<input type="text" name="q1" required maxlength="100" placeholder="例如：我的第一所学校名称是什么？">`, "", true)}
+        ${field("问题 1 答案", `<input type="text" name="a1" required minlength="2" maxlength="100" autocomplete="off" placeholder="至少 2 个字符">`, "验证时不区分大小写及全半角", true)}
+        ${field("密保问题 2", `<input type="text" name="q2" required maxlength="100" placeholder="例如：我最喜欢的运动或城市？">`, "", true)}
+        ${field("问题 2 答案", `<input type="text" name="a2" required minlength="2" maxlength="100" autocomplete="off" placeholder="至少 2 个字符">`, "两个密保问题不能相同", true)}
+        <div class="btn-row mt">
+          <button class="btn primary" type="submit">${has ? "🔄 更新密保设置" : "✅ 保存密保设置"}</button>
+          <a class="btn secondary" href="/profile">取消</a>
+        </div>
       </form>
     </div>`;
-
-  return layout({ title: "密保问题", ctx, content });
 }
 
 // ================= 系统设置 =================
 
 export function settingsPage(ctx: ViewCtx, s: Record<string, string>): string {
   const v = (k: string): string => esc(s[k] ?? "");
-  const content = `
-    ${pageHead("⚙️ 系统设置", "修改后立即生效")}
+  return `
+    ${pageHead("⚙️ 全局系统参数设置", "配置品牌名称、客户自助注册开关、二级分销默认比例与自动备份策略")}
     <form method="post" action="/settings">
       ${csrfInput(ctx.csrf)}
-      <div class="card"><h3>🏪 站点</h3>
-        ${field("站点名称", `<input type="text" name="site_name" maxlength="32" value="${v("site_name")}" placeholder="默认：进销通">`, "显示在侧边栏、顶部栏与浏览器标题")}
-        <div class="checkbox-row">
+      <div class="card"><h3>🏪 站点与门户配置</h3>
+        ${field("系统品牌名称", `<input type="text" name="site_name" maxlength="32" value="${v("site_name")}" placeholder="默认：进销通">`, "展示于侧边栏、顶部导航栏、打印单据抬头及登录页")}
+        <label class="checkbox-row mt">
           <input type="checkbox" id="allow_register" name="allow_register" value="1"${s["allow_register"] === "1" ? " checked" : ""}>
-          <label for="allow_register">允许客户自主注册（关闭后只能由管理员创建账号）</label>
-        </div>
+          <span><strong>开放客户自助注册</strong>（关闭后仅允许管理员在后台手动创建客户账号）</span>
+        </label>
       </div>
-      <div class="card"><h3>💰 分佣规则</h3>
+      <div class="card"><h3>💰 二级分销提成核算规则</h3>
         ${field(
-          "分佣基数",
+          "佣金计算基数",
           `<select name="commission_base">
-            <option value="profit"${(s["commission_base"] || "profit") === "profit" ? " selected" : ""}>按利润（售价 - 成本）</option>
-            <option value="total"${s["commission_base"] === "total" ? " selected" : ""}>按销售额</option>
+            <option value="profit"${(s["commission_base"] || "profit") === "profit" ? " selected" : ""}>按订单实际毛利润（折后销售额 - 加权成本）</option>
+            <option value="total"${s["commission_base"] === "total" ? " selected" : ""}>按订单折后销售额</option>
           </select>`,
-          "计算佣金时的金额基数"
+          "建议选择「按订单实际毛利润」，避免低毛利订单亏损发佣"
         )}
         <div class="form-row cols-3">
-          ${field("一级默认比例（%）", `<input type="number" name="commission_l1_default" min="0" max="100" step="0.01" value="${v("commission_l1_default") || "5"}">`, "未单独设置比例的一级销售适用")}
-          ${field("二级默认比例（%）", `<input type="number" name="commission_l2_default" min="0" max="100" step="0.01" value="${v("commission_l2_default") || "8"}">`, "未单独设置比例的二级销售适用")}
-          ${field("一级管理津贴（%）", `<input type="number" name="commission_l1_override" min="0" max="100" step="0.01" value="${v("commission_l1_override") || "2"}">`, "二级销售出单时，其上级获得的额外比例")}
+          ${field("一级销售默认提成（%）", `<input type="number" name="commission_l1_default" min="0" max="100" step="0.01" value="${v("commission_l1_default") || "5"}">`, "一级销售本人开单时的默认比例")}
+          ${field("二级销售默认提成（%）", `<input type="number" name="commission_l2_default" min="0" max="100" step="0.01" value="${v("commission_l2_default") || "8"}">`, "二级销售本人开单时的默认比例")}
+          ${field("上级一级管理津贴（%）", `<input type="number" name="commission_l1_override" min="0" max="100" step="0.01" value="${v("commission_l1_override") || "2"}">`, "二级销售开单时，其直属一级上级获得的津贴")}
         </div>
-        <p class="muted small">💡 也可在用户管理中为单个销售员设置专属分佣比例，专属比例优先于系统默认。</p>
       </div>
-      <div class="card"><h3>🗄️ 备份</h3>
-        ${field("备份保留份数", `<input type="number" name="backup_keep" min="1" max="30" step="1" value="${v("backup_keep") || "7"}">`, "自动清理超出数量的最旧备份")}
+      <div class="card"><h3>🗄️ R2 云端备份策略</h3>
+        ${field("自动备份保留份数", `<input type="number" name="backup_keep" min="1" max="60" step="1" value="${v("backup_keep") || "14"}">`, "每日凌晨 3:00 定时任务自动备份至 R2，超出保留份数的旧备份将自动轮转清理")}
       </div>
       <div class="btn-row">
-        <button class="btn primary" type="submit">💾 保存设置</button>
+        <button class="btn primary" type="submit">💾 保存系统设置</button>
       </div>
     </form>`;
-
-  return layout({ title: "系统设置", ctx, active: "settings", content });
 }
 
 // ================= 数据维护 =================
@@ -377,10 +418,13 @@ export function maintenancePage(ctx: ViewCtx, d: { backups: BackupInfo[]; keep: 
       ? d.backups
           .map(
             (b) => `<div class="backup-row">
-              <div>📦 <strong>${esc(b.key.split("/").pop() || b.key)}</strong><br><span class="muted small">${fmtSize(b.size)} · ${fmtDT(b.uploaded)}</span></div>
+              <div>
+                <strong>📦 ${esc(b.key.split("/").pop() || b.key)}</strong>
+                <div class="muted small">大小：${fmtSize(b.size)} · 备份时间：${fmtDT(b.uploaded)}</div>
+              </div>
               <div class="btn-row">
-                <a class="btn small secondary" href="/maintenance/backup/download?key=${encodeURIComponent(b.key)}">下载</a>
-                <form class="inline-form" method="post" action="/maintenance/delete" data-confirm="删除后无法恢复，确定删除该备份吗？">
+                <a class="btn small secondary" href="/maintenance/backup/download?key=${encodeURIComponent(b.key)}">⬇️ 下载 JSON</a>
+                <form class="inline-form" method="post" action="/maintenance/delete" data-confirm="删除后不可恢复，确定删除备份文件 ${esc(b.key)} 吗？">
                   ${csrfInput(ctx.csrf)}
                   <input type="hidden" name="key" value="${esc(b.key)}">
                   <button class="btn small danger" type="submit">删除</button>
@@ -389,34 +433,38 @@ export function maintenancePage(ctx: ViewCtx, d: { backups: BackupInfo[]; keep: 
             </div>`
           )
           .join("")
-      : `<p class="muted" align="center">📭 暂无备份，点击「立即备份」创建第一份备份</p>`;
+      : `<div class="empty-state"><span class="empty-ico">🗄️</span><span>R2 存储桶中暂无备份快照，点击上方按钮立即创建</span></div>`;
 
-  const content = `
-    ${pageHead("🗄️ 数据维护", "备份、恢复与数据安全")}
+  return `
+    ${pageHead("🗄️ 云端数据备份与灾难恢复", "全量业务数据支持一键快照至 Cloudflare R2 对象存储或导出至本地")}
     <div class="grid cols-2">
-      <div class="card"><h3>📦 数据备份</h3>
-        <p class="muted small">备份包含全部业务数据（用户、商品、单据、流水、佣金等），保存为 JSON 文件存入 R2。当前保留最近 <strong>${esc(d.keep)}</strong> 份。</p>
-        <form method="post" action="/maintenance/backup">
-          ${csrfInput(ctx.csrf)}
-          <button class="btn primary" type="submit">📦 立即备份</button>
-        </form>
-        <hr class="divider">
-        ${rows}
+      <div class="card">
+        <div class="card-head">
+          <h3>📦 R2 云端备份列表（保留最近 ${esc(d.keep)} 份自动备份）</h3>
+          <form method="post" action="/maintenance/backup" class="inline-form">
+            ${csrfInput(ctx.csrf)}
+            <button class="btn small primary" type="submit">＋ 立即创建快照</button>
+          </form>
+        </div>
+        <p class="muted small mb">包含用户、密保、商品、分类、供应商、进销退单据、库存流水、分佣记录与系统设置全量表。</p>
+        <div class="backup-list">${rows}</div>
       </div>
-      <div class="card"><h3>♻️ 从备份恢复</h3>
-        <p class="muted small">上传之前下载的备份 JSON 文件进行恢复。</p>
-        <form method="post" action="/maintenance/restore" enctype="multipart/form-data" data-confirm="⚠️ 恢复将用备份数据覆盖当前全部数据，此操作不可撤销！确定继续吗？">
+      <div class="card">
+        <h3>♻️ 从备份快照恢复系统</h3>
+        <p class="muted small mb">上传本系统导出的 <code>.json</code> 备份文件，全量回滚替换当前 D1 数据库并强制注销所有在线会话。</p>
+        <form method="post" action="/maintenance/restore" enctype="multipart/form-data" data-confirm="⚠️ 高危操作确认：恢复将用备份文件完全覆盖当前数据库中的所有数据，确定继续吗？">
           ${csrfInput(ctx.csrf)}
-          ${field("备份文件", `<input type="file" name="backup" accept=".json,application/json" required>`, "仅支持本系统导出的备份文件")}
-          <button class="btn danger" type="submit">♻️ 从备份恢复</button>
+          ${field("选择备份 JSON 文件", `<input type="file" name="backup" accept=".json,application/json" required>`, "仅支持进销通导出的标准备份结构", true)}
+          <button class="btn danger" type="submit">♻️ 确认覆盖并恢复数据</button>
         </form>
         <hr class="divider">
-        <h3>💡 安全建议</h3>
-        <p class="muted small">· 重要操作前先备份<br>· 定期将备份下载到本地保存<br>· 恢复操作会清空当前数据，请谨慎</p>
+        <h3>🛡️ 数据安全运维建议</h3>
+        <ul class="guide-list">
+          <li>在进行大批量调价、盘点或人员结构调整前，建议先点击「立即创建快照」。</li>
+          <li>建议每月定期下载一份备份 JSON 文件保存在本地离线介质中，实现异地双备份。</li>
+        </ul>
       </div>
     </div>`;
-
-  return layout({ title: "数据维护", ctx, active: "maintenance", content });
 }
 
 // ================= 操作日志 =================
@@ -440,31 +488,29 @@ export function auditPage(
       ? d.rows
           .map(
             (r) => `<tr>
-              <td class="muted">#${r.id}</td>
-              <td>${esc(r.username || "—")}</td>
-              <td>${esc(r.action)}</td>
-              <td class="small">${esc(r.target)}</td>
-              <td class="muted small">${esc(r.detail.slice(0, 120))}</td>
-              <td class="muted small">${esc(r.ip)}</td>
+              <td class="muted small">#${r.id}</td>
+              <td><strong>${esc(r.username || "系统任务")}</strong></td>
+              <td>${badge(r.action, /删除|作废|禁用|恢复/.test(r.action) ? "red" : /新建|新增|结算/.test(r.action) ? "green" : "blue")}</td>
+              <td>${esc(r.target)}</td>
+              <td class="small">${esc(r.detail.slice(0, 150))}</td>
+              <td><code>${esc(r.ip)}</code></td>
               <td class="muted small">${fmtDT(r.created_at)}</td>
             </tr>`
           )
           .join("")
-      : emptyRow(7, "暂无操作日志");
+      : emptyRow(7, "暂无操作审计记录");
 
-  const content = `
-    ${pageHead("📜 操作日志", `共 ${d.total} 条记录`, "")}
+  return `
+    ${pageHead("📜 安全操作审计日志", `共 ${d.total} 条关键业务与安全操作留痕`)}
     <form class="toolbar" method="get" action="/audit">
-      <input type="text" name="q" value="${esc(d.q)}" placeholder="🔍 操作 / 目标 / 用户名" maxlength="64">
-      <button class="btn secondary" type="submit">搜索</button>
-      ${d.q ? `<a class="btn secondary" href="/audit">清除</a>` : ""}
+      <input type="text" name="q" value="${esc(d.q)}" placeholder="🔍 搜索操作类型 / 目标对象 / 详情 / 操作人用户名..." maxlength="64" class="grow">
+      <button class="btn primary" type="submit">检索</button>
+      ${d.q ? `<a class="btn secondary" href="/audit">重置</a>` : ""}
     </form>
     <div class="card"><div class="table-wrap"><table class="table">
-      <thead><tr><th>ID</th><th>用户</th><th>操作</th><th>目标</th><th>详情</th><th>IP</th><th>时间</th></tr></thead>
+      <thead><tr><th>流水号</th><th>操作账号</th><th>动作类型</th><th>操作模块</th><th>详细操作内容</th><th>来源 IP</th><th>记录时间</th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>
     ${pagerHtml("/audit", { q: d.q }, d.page, tp(d.total, d.pageSize))}
     </div>`;
-
-  return layout({ title: "操作日志", ctx, active: "audit", content });
 }

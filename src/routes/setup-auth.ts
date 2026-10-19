@@ -41,7 +41,9 @@ async function issueSession(
   const ip = clientIP(c);
   const token = randHex();
   const digest = await sha256hex(token);
-  const ttlMs = remember ? 30 * 86400000 : 12 * 3600000;
+  const ttlHours = parseInt(c.env.SESSION_TTL_HOURS || "12", 10) || 12;
+  const rememberDays = parseInt(c.env.REMEMBER_TTL_DAYS || "30", 10) || 30;
+  const ttlMs = remember ? rememberDays * 86400000 : ttlHours * 3600000;
   await s.createSession(digest, u.id, new Date(Date.now() + ttlMs).toISOString(), ip, userAgent(c));
   const maxAge = Math.floor(ttlMs / 1000);
   const secure = isHttps(c);
@@ -80,12 +82,15 @@ export function registerSetupAuth(app: Hono<AppEnv>) {
     const s = store(c);
     try {
       if ((await s.countAdmins()) > 0) {
-        throw new HTTPException(403, { res: c.html(errorPage(looseCtx(c), 403, "禁止访问", "系统已完成初始化，无需重复设置。"), 403) });
+        throw new HTTPException(403, {
+          res: c.html(errorPage(looseCtx(c), 403, "禁止访问", "系统已完成初始化，无需重复设置。"), 403),
+        });
       }
       const { fields } = await parseForm(c);
       const username = (fields.username || "").trim();
       const password = fields.password || "";
-      const nickname = (fields.nickname || "").trim();
+      const confirmPw = fields.confirm_password ?? fields.confirm ?? "";
+      const nickname = (fields.nickname || "").trim() || username;
       const q1 = (fields.q1 || "").trim();
       const a1 = (fields.a1 || "").trim();
       const q2 = (fields.q2 || "").trim();
@@ -94,9 +99,10 @@ export function registerSetupAuth(app: Hono<AppEnv>) {
         validateUsername(username) ||
         validatePassword(password) ||
         (!nickname ? "昵称不能为空" : null) ||
-        (password !== (fields.confirm || "") ? "两次输入的密码不一致" : null) ||
+        (password !== confirmPw ? "两次输入的密码不一致" : null) ||
         (!q1 || !a1 || !q2 || !a2 ? "请完整填写两个密保问题及答案" : null) ||
-        (q1 === q2 ? "两个密保问题不能相同" : null);
+        (q1 === q2 ? "两个密保问题不能相同" : null) ||
+        (a1.length < 2 || a2.length < 2 ? "密保答案至少 2 个字符" : null);
       if (err) return redirectWith(c, "/setup", undefined, err);
       if (await s.getUserByUsername(username)) return redirectWith(c, "/setup", undefined, "用户名已存在");
       const id = await s.createUser({
@@ -107,7 +113,7 @@ export function registerSetupAuth(app: Hono<AppEnv>) {
       });
       await s.setSecurityQuestions(id, q1, await hashAnswer(a1), q2, await hashAnswer(a2));
       await s.audit(id, "初始化", "管理员账号", `创建初始管理员 ${username}`, clientIP(c));
-      return redirectWith(c, "/login", "管理员创建成功，请登录");
+      return redirectWith(c, "/login", "管理员创建成功，请使用刚创建的账号登录");
     } catch (e) {
       if (e instanceof HTTPException) throw e;
       return redirectWith(c, "/setup", undefined, "初始化失败：" + (e as Error).message);
@@ -131,8 +137,9 @@ export function registerSetupAuth(app: Hono<AppEnv>) {
       const remember = fields.remember === "on" || fields.remember === "1";
       const ip = clientIP(c);
       const maxAttempts = parseInt(c.env.MAX_LOGIN_ATTEMPTS || "5", 10) || 5;
-      if (username && (await s.countRecentFailures(username, ip, 15)) >= maxAttempts) {
-        return redirectWith(c, "/login", undefined, "登录尝试过多，请15分钟后再试");
+      const lockMinutes = parseInt(c.env.LOCK_MINUTES || "15", 10) || 15;
+      if (username && (await s.countRecentFailures(username, ip, lockMinutes)) >= maxAttempts) {
+        return redirectWith(c, "/login", undefined, `登录尝试过多，请 ${lockMinutes} 分钟后再试`);
       }
       const u = username ? await s.getUserByUsername(username) : null;
       if (!u) {
@@ -188,7 +195,9 @@ export function registerSetupAuth(app: Hono<AppEnv>) {
       const { fields } = await parseForm(c);
       const username = (fields.username || "").trim();
       const password = fields.password || "";
-      const nickname = (fields.nickname || "").trim();
+      const confirmPw = fields.confirm_password ?? fields.confirm ?? "";
+      const nickname = (fields.nickname || "").trim() || username;
+      const phone = (fields.phone || "").trim();
       const q1 = (fields.q1 || "").trim();
       const a1 = (fields.a1 || "").trim();
       const q2 = (fields.q2 || "").trim();
@@ -197,7 +206,7 @@ export function registerSetupAuth(app: Hono<AppEnv>) {
         validateUsername(username) ||
         validatePassword(password) ||
         (!nickname ? "昵称不能为空" : null) ||
-        (password !== (fields.confirm || "") ? "两次输入的密码不一致" : null) ||
+        (password !== confirmPw ? "两次输入的密码不一致" : null) ||
         (!q1 || !a1 || !q2 || !a2 ? "请完整填写两个密保问题及答案" : null) ||
         (q1 === q2 ? "两个密保问题不能相同" : null) ||
         (a1.length < 2 || a2.length < 2 ? "密保答案至少 2 个字符" : null);
@@ -208,6 +217,7 @@ export function registerSetupAuth(app: Hono<AppEnv>) {
         password_hash: await hashPassword(password),
         role: "customer",
         nickname,
+        phone,
       });
       await s.setSecurityQuestions(id, q1, await hashAnswer(a1), q2, await hashAnswer(a2));
       await s.audit(id, "注册", "账号", `客户 ${username} 自主注册`, clientIP(c));
@@ -271,7 +281,7 @@ export function registerSetupAuth(app: Hono<AppEnv>) {
         return redirectWith(c, "/forgot", undefined, "密保答案不正确，请重试");
       }
       await s.recordRecoveryAttempt(username, ip, true);
-      // 验证通过：直接创建会话登录（12 小时有效期）
+      // 验证通过：直接创建会话登录
       const { cookie } = await issueSession(c, s, u, false);
       await s.audit(u.id, "找回密码", "账号", "通过密保验证登录", ip);
       const res = redirectWith(c, "/profile/password", "身份验证通过，请立即设置新密码");

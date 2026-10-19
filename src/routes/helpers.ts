@@ -15,12 +15,13 @@ export function store(c: Context<AppEnv>): Store {
 
 /** 标准页面上下文（要求已登录） */
 export function pageCtx(c: Context<AppEnv>): ViewCtx {
-  const settings = c.get("settings");
+  const settings = c.get("settings") || {};
   return {
     user: c.get("user")!,
     csrf: c.get("csrfToken"),
     settings,
     appName: settings.site_name || "进销通",
+    lowStockCount: c.get("lowStockCount") || 0,
   };
 }
 
@@ -32,6 +33,7 @@ export function looseCtx(c: Context<AppEnv>): ViewCtx {
     csrf: c.get("csrfToken") || "",
     settings,
     appName: settings.site_name || "进销通",
+    lowStockCount: c.get("lowStockCount") || 0,
   };
 }
 
@@ -86,8 +88,6 @@ export async function parseForm(c: Context<AppEnv>): Promise<ParsedForm> {
     });
   }
   const fields: Record<string, string> = {};
-  // 注意：workers-types 把 entries()/get()/getAll() 的值类型标成了 string，
-  // 但运行时文件字段实际返回 File，这里用 unknown 中转做类型收窄。
   for (const [k, v] of fd.entries() as IterableIterator<[string, unknown]>) {
     if (v instanceof File) continue;
     fields[k] = String(v);

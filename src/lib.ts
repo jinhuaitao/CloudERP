@@ -13,6 +13,11 @@ export function esc(s: unknown): string {
     .replace(/'/g, "&#39;");
 }
 
+/** 保留两位小数四舍五入 */
+export function round2(n: number | null | undefined): number {
+  return Math.round((Number(n) || 0) * 100) / 100;
+}
+
 /** 金额格式化 */
 export function money(n: number | null | undefined): string {
   const v = Number(n || 0);
@@ -21,8 +26,7 @@ export function money(n: number | null | undefined): string {
 
 /** 数量格式化（去多余小数） */
 export function qty(n: number | null | undefined): string {
-  const v = Number(n || 0);
-  return String(Math.round(v * 100) / 100);
+  return String(round2(n));
 }
 
 export function nowISO(): string {
@@ -50,16 +54,19 @@ export function todayUTC8(): string {
 
 /** 东八区某日期对应 UTC 起止 ISO（供 D1 created_at 范围查询用） */
 export function utc8Range(dateStr: string): { start: string; end: string } {
-  const [y, m, d] = dateStr.split("-").map(Number);
+  const parts = dateStr.split("-").map(Number);
+  if (parts.length !== 3 || parts.some(isNaN)) {
+    const fallback = todayUTC8();
+    return utc8Range(fallback);
+  }
+  const [y, m, d] = parts;
   const startUTC = Date.UTC(y, m - 1, d, 0, 0, 0) - 8 * 3600 * 1000;
   return { start: new Date(startUTC).toISOString(), end: new Date(startUTC + 86400000).toISOString() };
 }
 
-/** 单号生成：前缀 + 日期 + 4位随机，如 PO202610180123 */
+/** 单号生成：前缀 + 东八区日期 + 4位随机，如 PO202610190123 */
 export function uid(prefix: string): string {
-  const d = new Date();
-  const p = (x: number) => String(x).padStart(2, "0");
-  const date = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`;
+  const date = todayUTC8().replace(/-/g, "");
   const rand = Math.floor(1000 + Math.random() * 9000);
   return `${prefix}${date}${rand}`;
 }
@@ -133,14 +140,14 @@ export function totalPages(total: number, pageSize: number): number {
 
 function csvCell(v: string | number | null | undefined): string {
   let s = String(v ?? "");
-  // 公式注入防护：以 = + - @ 开头的单元格加前导单引号
-  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+  // 公式注入防护：以 = + - @ 开头的非纯数字单元格加前导单引号
+  if (/^[=+\-@\t\r]/.test(s) && !/^-[0-9]+(\.[0-9]+)?$/.test(s)) s = "'" + s;
   if (/[",\n\r]/.test(s)) s = '"' + s.replace(/"/g, '""') + '"';
   return s;
 }
 
 export function toCSV(rows: (string | number | null | undefined)[][]): string {
-  return "﻿" + rows.map((r) => r.map(csvCell).join(",")).join("\r\n");
+  return "\uFEFF" + rows.map((r) => r.map(csvCell).join(",")).join("\r\n");
 }
 
 // ---------- 表单校验 ----------
@@ -166,9 +173,9 @@ export function isLocked(failCount: number, maxAttempts: number): boolean {
 /** R2 对象 key 生成 */
 export function r2Key(prefix: string, filename: string): string {
   const ext = (filename.split(".").pop() || "bin").toLowerCase().replace(/[^a-z0-9]/g, "") || "bin";
-  const d = new Date();
+  const d = new Date(Date.now() + 8 * 3600 * 1000);
   const p = (x: number) => String(x).padStart(2, "0");
-  return `${prefix}/${d.getFullYear()}${p(d.getMonth() + 1)}/${Date.now()}-${randHex(4)}.${ext}`;
+  return `${prefix}/${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}/${Date.now()}-${randHex(4)}.${ext}`;
 }
 
 /** 从 multipart 表单安全读取文件 */
