@@ -61,7 +61,6 @@ const CUSTOMER_MENU: MenuItem[] = [
   { group: "在线订货", key: "catalog", icon: "🛍️", label: "商品目录", href: "/catalog" },
   { group: "在线订货", key: "shop", icon: "🛒", label: "自助下单", href: "/shop" },
   { group: "订单与账户", key: "sales", icon: "📋", label: "我的订单", href: "/sales" },
-  { group: "订单与账户", key: "profile", icon: "📍", label: "收货信息与个人中心", href: "/profile" },
 ];
 
 function menuFor(role: string): MenuItem[] {

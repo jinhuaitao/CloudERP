@@ -93,17 +93,36 @@
     });
   }
 
-  // ---------- 5b. 收款方式切换时高亮对应微信/支付宝二维码卡片 ----------
+  // ---------- 5b. 结算方式切换时，下方只显示对应的微信/支付宝收款码 ----------
   function paymentQrSwitcher() {
     var paySel = document.getElementById("paymentSelect");
     var qrBox = document.getElementById("paymentQrBox");
     if (!paySel || !qrBox) return;
+    var cards = Array.prototype.slice.call(qrBox.querySelectorAll("[data-payqr-card]"));
+    var emptyEl = qrBox.querySelector("[data-payqr-empty]");
+
     function syncActive() {
       var val = paySel.value;
-      qrBox.querySelectorAll("[data-payqr-card]").forEach(function (card) {
-        var kind = card.getAttribute("data-payqr-card");
-        card.classList.toggle("active", kind === val);
+      var shown = 0;
+      cards.forEach(function (card) {
+        var on = card.getAttribute("data-payqr-card") === val;
+        card.classList.toggle("active", on);
+        card.hidden = !on;
+        if (on) shown++;
       });
+      qrBox.classList.toggle("is-empty", shown === 0);
+      if (!emptyEl) return;
+      if (shown > 0) {
+        emptyEl.hidden = true;
+        emptyEl.textContent = "";
+        return;
+      }
+      var label = paySel.selectedOptions[0] ? paySel.selectedOptions[0].textContent : "该结算方式";
+      emptyEl.hidden = false;
+      emptyEl.textContent =
+        val === "wechat" || val === "alipay"
+          ? "商家暂未上传" + (val === "alipay" ? "支付宝" : "微信") + "收款码，请更换结算方式或联系客服确认。"
+          : "「" + label + "」无需扫码支付，按约定结算即可。";
     }
     paySel.addEventListener("change", syncActive);
     syncActive();

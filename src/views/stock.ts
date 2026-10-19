@@ -31,13 +31,16 @@ function tp(total: number, pageSize: number): number {
   return Math.max(1, Math.ceil(total / pageSize));
 }
 
-/** 渲染微信收款码 / 支付宝收款码展示面板（用于开单、自助下单、订单详情与欠款核销） */
+/** 渲染微信收款码 / 支付宝收款码展示面板（用于开单、自助下单、订单详情与欠款核销）
+ *  只展示当前「结算方式」对应的那一个二维码，其余由 app.js 在切换下拉框时联动显隐。 */
 export function paymentQrWidget(ctx: ViewCtx, activeMethod?: string, heading = "📲 扫码收款二维码（微信支付 / 支付宝）"): string {
   const wechatKey = ctx.settings?.wechat_qr_key || "";
   const alipayKey = ctx.settings?.alipay_qr_key || "";
   const note = ctx.settings?.payment_note || "";
   const wechatUrl = wechatKey ? fileUrl(wechatKey) : "";
   const alipayUrl = alipayKey ? fileUrl(alipayKey) : "";
+  const active = activeMethod === "alipay" ? "alipay" : "wechat";
+  const activeUrl = active === "alipay" ? alipayUrl : wechatUrl;
 
   if (!wechatUrl && !alipayUrl) {
     if (ctx.user?.role === "admin") {
@@ -49,19 +52,21 @@ export function paymentQrWidget(ctx: ViewCtx, activeMethod?: string, heading = "
     return "";
   }
 
-  return `<div class="payqr-panel" id="paymentQrBox">
+  return `<div class="payqr-panel" id="paymentQrBox" data-active-method="${active}">
     <div class="payqr-panel-head">
       <strong>${esc(heading)}</strong>
       ${
         ctx.user?.role === "admin"
           ? `<a class="small no-print" href="/settings#payqr">⚙️ 管理收款码</a>`
-          : `<span class="muted small">请使用微信或支付宝扫码支付</span>`
+          : `<span class="muted small">切换结算方式将自动显示对应收款码</span>`
       }
     </div>
     <div class="payqr-cards">
       ${
         wechatUrl
-          ? `<div class="payqr-item wechat${activeMethod === "wechat" ? " active" : ""}" data-payqr-card="wechat">
+          ? `<div class="payqr-item wechat${active === "wechat" ? " active" : ""}" data-payqr-card="wechat"${
+              active === "wechat" ? "" : " hidden"
+            }>
               <div class="payqr-tag wechat">💚 微信扫码支付</div>
               <img src="${esc(wechatUrl)}" alt="微信收款码" class="payqr-display-img">
             </div>`
@@ -69,13 +74,18 @@ export function paymentQrWidget(ctx: ViewCtx, activeMethod?: string, heading = "
       }
       ${
         alipayUrl
-          ? `<div class="payqr-item alipay${activeMethod === "alipay" ? " active" : ""}" data-payqr-card="alipay">
+          ? `<div class="payqr-item alipay${active === "alipay" ? " active" : ""}" data-payqr-card="alipay"${
+              active === "alipay" ? "" : " hidden"
+            }>
               <div class="payqr-tag alipay">💙 支付宝扫码支付</div>
               <img src="${esc(alipayUrl)}" alt="支付宝收款码" class="payqr-display-img">
             </div>`
           : ""
       }
     </div>
+    <div class="payqr-empty-method" data-payqr-empty${activeUrl ? " hidden" : ""}>${
+      activeUrl ? "" : `商家暂未上传${active === "alipay" ? "支付宝" : "微信"}收款码，请更换结算方式或联系客服确认。`
+    }</div>
     ${note ? `<div class="payqr-note">📌 ${esc(note)}</div>` : ""}
   </div>`;
 }
@@ -560,8 +570,9 @@ export function salesDetailPage(ctx: ViewCtx, o: SalesOrder, canVoid: boolean): 
     })
     .join("");
   const debt = round2(o.total - o.paid);
+  // 默认选中订单原结算方式，使下方收款码与下拉框初始状态一致
   const payOptions = ["wechat", "alipay", "cash", "bank"]
-    .map((k) => `<option value="${k}">${esc(paymentName(k))}</option>`)
+    .map((k) => `<option value="${k}"${o.payment === k ? " selected" : ""}>${esc(paymentName(k))}</option>`)
     .join("");
 
   const debtCard =

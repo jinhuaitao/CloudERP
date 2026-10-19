@@ -515,8 +515,7 @@ export function registerSystem(app: Hono<AppEnv>) {
       if (!address) return redirectWith(c, "/profile", undefined, "请填写详细收货地址");
       await s.updateUser(u.id, { shipping_name, phone, address });
       await s.audit(u.id, "设置收货信息", "收货地址", `更新收货人 ${shipping_name} / ${phone}`, clientIP(c));
-      const nextUrl = fields.next === "shop" ? "/shop" : fields.next === "catalog" ? "/catalog" : "/profile";
-      return redirectWith(c, nextUrl, "收货信息（收货人、联系电话、地址）已保存生效");
+      return redirectWith(c, "/profile", "收货信息（收货人、联系电话、地址）已保存生效");
     } catch (e) {
       if (e instanceof HTTPException) throw e;
       return redirectWith(c, "/profile", undefined, "保存收货信息失败：" + (e as Error).message);

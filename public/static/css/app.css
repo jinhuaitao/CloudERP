@@ -973,7 +973,25 @@ canvas.chart { width: 100%; height: 100%; display: block; }
   display: flex;
   gap: 18px;
   flex-wrap: wrap;
+  justify-content: center;
+  min-height: 40px;
 }
+@keyframes payqrIn {
+  from { opacity: 0; transform: translateY(-8px) scale(0.97); }
+  to { opacity: 1; transform: none; }
+}
+.payqr-item[hidden] { display: none; }
+.payqr-item:not([hidden]) { animation: payqrIn 0.2s ease-out; }
+.payqr-empty-method {
+  padding: 14px 16px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--card);
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+}
+.payqr-empty-method[hidden] { display: none; }
 .payqr-item {
   background: var(--card);
   border: 2px solid var(--border);

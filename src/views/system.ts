@@ -353,13 +353,7 @@ export function profilePage(
           true
         )}
         <div class="btn-row">
-          <button class="btn secondary" type="submit">💾 保存收货信息</button>
-          ${
-            isCustomer
-              ? `<button class="btn primary" type="submit" name="next" value="catalog">🛍️ 保存并去商品目录 →</button>
-                 <button class="btn success" type="submit" name="next" value="shop">🛒 保存并前往下单 →</button>`
-              : ""
-          }
+          <button class="btn primary" type="submit">💾 保存收货信息</button>
         </div>
       </form>
     </div>`;
