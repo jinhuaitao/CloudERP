@@ -193,6 +193,8 @@ export interface SalesOrder {
   remark: string;
   status: string;
   created_at: string;
+  /** 列表页附带：本单已完成的有效退货单数 */
+  return_cnt?: number;
   items?: SalesItem[];
 }
 export interface ReturnItem {
@@ -1454,7 +1456,9 @@ export class Store {
       (
         await this.db
           .prepare(
-            `SELECT so.*, cu.nickname AS customer_name, sa.nickname AS sales_name FROM sales_orders so
+            `SELECT so.*, cu.nickname AS customer_name, sa.nickname AS sales_name,
+               (SELECT COUNT(*) FROM return_orders ro WHERE ro.sales_order_id=so.id AND ro.status='done') AS return_cnt
+             FROM sales_orders so
              LEFT JOIN users cu ON cu.id=so.customer_id LEFT JOIN users sa ON sa.id=so.sales_id
              ${w} ORDER BY so.id DESC LIMIT ? OFFSET ?`
           )
@@ -1462,6 +1466,14 @@ export class Store {
           .all<SalesOrder>()
       ).results || [];
     return { rows, total };
+  }
+  /** 按单号精确查单（办理退货时用，避免模糊搜索命中别的单） */
+  async getSalesOrderByNo(order_no: string): Promise<SalesOrder | null> {
+    const hit = await this.db
+      .prepare("SELECT id FROM sales_orders WHERE order_no=?")
+      .bind(order_no)
+      .first<{ id: number }>();
+    return hit ? this.getSalesOrder(hit.id) : null;
   }
   async getSalesOrder(id: number): Promise<SalesOrder | null> {
     const o = await this.db
@@ -1574,26 +1586,39 @@ export class Store {
       if (!o.customer_id && linkedOrder.customer_id) {
         o.customer_id = linkedOrder.customer_id;
       }
-      const soldQtyMap = new Map<number, number>();
-      for (const si of linkedOrder.items || []) {
-        soldQtyMap.set(si.product_id, round2((soldQtyMap.get(si.product_id) || 0) + si.qty));
+      if (o.customer_id && linkedOrder.customer_id && o.customer_id !== linkedOrder.customer_id) {
+        throw new Error(`退货客户与原销售单 ${linkedOrder.order_no} 的客户不一致，请重新选择`);
       }
-      // 同一原单可能已经退过一部分，可退数量 = 售出 - 历史已退（仅统计有效退货单）
-      const returnedQtyMap = await this.returnedQtyByOrder(linkedOrder.id);
+      // 可退数量与退货单价均以原单为准：可退 = 售出 - 有效退货单已退
+      const returnable = await this.returnableQtyByOrder(linkedOrder.id);
+      const priceCap = new Map<number, number>();
+      for (const si of linkedOrder.items || []) {
+        priceCap.set(si.product_id, Math.max(priceCap.get(si.product_id) || 0, round2(si.price)));
+      }
       const reqQtyMap = new Map<number, number>();
       for (const it of o.items) {
         reqQtyMap.set(it.product_id, round2((reqQtyMap.get(it.product_id) || 0) + it.qty));
       }
       for (const [pid, reqQty] of reqQtyMap) {
-        const soldQty = soldQtyMap.get(pid) || 0;
         const pName = prods.get(pid)?.name || `#${pid}`;
-        if (soldQty === 0) throw new Error(`原销售单 ${linkedOrder.order_no} 中不包含商品「${pName}」`);
-        const remainQty = round2(soldQty - (returnedQtyMap.get(pid) || 0));
-        if (reqQty > remainQty) {
+        const e = returnable.get(pid);
+        if (!e) throw new Error(`原销售单 ${linkedOrder.order_no} 中不包含商品「${pName}」，无法办理退货`);
+        if (e.avail <= 0) {
           throw new Error(
-            remainQty <= 0
-              ? `商品「${pName}」在原销售单中已全部退完，无可退数量`
-              : `商品「${pName}」退货数量（${reqQty}）超过可退数量（${remainQty}，原单售出 ${soldQty}，已退 ${round2(soldQty - remainQty)}）`
+            `商品「${pName}」在原销售单 ${linkedOrder.order_no} 中已全部退完（售出 ${e.sold}，已退 ${e.returned}），无可退数量`
+          );
+        }
+        if (reqQty > e.avail) {
+          throw new Error(
+            `商品「${pName}」本次退货 ${reqQty}，超过可退数量 ${e.avail}（原单售出 ${e.sold}，已退 ${e.returned}）`
+          );
+        }
+      }
+      for (const it of o.items) {
+        const cap = priceCap.get(it.product_id);
+        if (cap !== undefined && round2(it.price) > cap) {
+          throw new Error(
+            `商品「${prods.get(it.product_id)?.name || `#${it.product_id}`}」退货单价 ${round2(it.price)} 高于原成交单价 ${cap}`
           );
         }
       }
@@ -1792,6 +1817,40 @@ export class Store {
     const m = new Map<number, number>();
     for (const r of rows) m.set(r.product_id, round2(r.qty || 0));
     return m;
+  }
+
+  /** 原单每款商品的售出 / 已退 / 可退数量（可退 = 售出 - 有效退货单已退） */
+  async returnableQtyByOrder(
+    salesOrderId: number
+  ): Promise<Map<number, { sold: number; returned: number; avail: number }>> {
+    const m = new Map<number, { sold: number; returned: number; avail: number }>();
+    const order = await this.getSalesOrder(salesOrderId);
+    if (!order) return m;
+    const sold = new Map<number, number>();
+    for (const si of order.items || []) {
+      sold.set(si.product_id, round2((sold.get(si.product_id) || 0) + si.qty));
+    }
+    const returned = await this.returnedQtyByOrder(salesOrderId);
+    for (const [pid, s] of sold) {
+      const r = round2(returned.get(pid) || 0);
+      m.set(pid, { sold: s, returned: r, avail: round2(s - r) });
+    }
+    return m;
+  }
+
+  /** 某张销售单关联的全部退货单（含已作废，供原单页面展示退货记录） */  async listReturnsBySalesOrder(salesOrderId: number): Promise<ReturnOrder[]> {
+    return (
+      (
+        await this.db
+          .prepare(
+            `SELECT ro.*, u.nickname AS operator_name FROM return_orders ro
+             LEFT JOIN users u ON u.id=ro.operator_id
+             WHERE ro.sales_order_id=? ORDER BY ro.id DESC`
+          )
+          .bind(salesOrderId)
+          .all<ReturnOrder>()
+      ).results || []
+    );
   }
 
   // ============ 客户退换货申请（客户提交 → 管理员审核） ============

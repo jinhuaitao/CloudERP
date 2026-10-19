@@ -449,7 +449,9 @@ export function salesListPage(
               <td class="num">${money(o.paid)}</td>
               <td class="num ${debt > 0 ? "neg" : "muted"}">${debt > 0 ? money(debt) : "已结清"}</td>
               <td>${esc(paymentName(o.payment))}</td>
-              <td>${orderStatusBadge(o.status)}</td>
+              <td>${orderStatusBadge(o.status)}${
+                (o.return_cnt || 0) > 0 ? `<div class="small" style="margin-top:4px">${badge(`已退 ${o.return_cnt} 单`, "red")}</div>` : ""
+              }</td>
               <td class="muted small">${fmtDT(o.created_at)}</td>
               <td><a class="btn small secondary" href="/sales/${o.id}">查看</a></td>
             </tr>`;
@@ -678,17 +680,37 @@ export function salesDetailPage(
   ctx: ViewCtx,
   o: SalesOrder,
   canVoid: boolean,
-  customerBalance?: number
+  customerBalance?: number,
+  /** 本单的退货情况：有效退货单的已退数量 + 全部退货单记录 */
+  ret?: { returnedQty: Map<number, number>; orders: ReturnOrder[] }
 ): string {
   const isAdmin = ctx.user?.role === "admin";
   const canCollectDebt = ctx.user?.role === "admin" || (ctx.user?.role === "sales" && o.sales_id === ctx.user.id);
+  // 每款商品按原单聚合：同一商品在原单里可能有多行，已退数量是商品级的
+  const soldByPid = new Map<number, number>();
+  for (const it of o.items || []) {
+    soldByPid.set(it.product_id, round2((soldByPid.get(it.product_id) || 0) + it.qty));
+  }
+  const availOf = (pid: number) => round2((soldByPid.get(pid) || 0) - (ret?.returnedQty.get(pid) || 0));
+  const totalAvail = [...soldByPid.keys()].reduce((s, pid) => s + Math.max(0, availOf(pid)), 0);
+  const returnedOrders = (ret?.orders || []).filter((r) => r.status === "done");
+  const returnedAmount = round2(returnedOrders.reduce((s, r) => s + (r.total || 0), 0));
+  const seen = new Set<number>();
   const items = (o.items || [])
     .map((it, i) => {
       const profit = round2((it.price - it.cost) * it.qty);
+      const back = ret?.returnedQty.get(it.product_id) || 0;
+      // 已退数量是商品级的：同一商品在原单里有多行时只在首行显示，避免逐行相加产生误读
+      const first = !seen.has(it.product_id);
+      seen.add(it.product_id);
+      const returnCell = !first
+        ? `<td class="num muted small">同上行</td>`
+        : `<td class="num ${back > 0 ? "neg" : "muted"}">${back > 0 ? qty(back) : "—"}</td>`;
       return `<tr>
         <td>${i + 1}</td>
         <td><strong>${esc(it.product_name || "—")}</strong>${it.sku ? `<br><span class="muted small">SKU: ${esc(it.sku)}</span>` : ""}</td>
         <td class="num">${qty(it.qty)} ${esc(it.unit || "")}</td>
+        ${ret ? returnCell : ""}
         <td class="num">${money(it.price)}</td>
         ${isAdmin ? `<td class="num muted">${money(it.cost)}</td>` : ""}
         <td class="num"><strong>${money(it.amount)}</strong></td>
@@ -697,6 +719,8 @@ export function salesDetailPage(
     })
     .join("");
   const debt = round2(o.total - o.paid);
+  const allReturned = !!ret && returnedOrders.length > 0 && totalAvail <= 0;
+  const returnBtnNote = `<span class="muted small">↩️ 该单商品已全部退回</span>`;
   // 默认选中订单原结算方式，使下方收款码与下拉框初始状态一致
   const payMethods = ["wechat", "alipay", "cash", "bank"];
   // 仅关联了客户的订单才能用余额补收
@@ -729,6 +753,30 @@ export function salesDetailPage(
         </div>`
       : "";
 
+  const returnCard =
+    ret && ret.orders.length
+      ? `<div class="card no-print"><h3>↩️ 本单退货记录（有效退货单 ${returnedOrders.length} 张）</h3>
+          <div class="table-wrap"><table class="table">
+            <thead><tr><th>退货单号</th><th class="num">退款金额</th><th>经办人</th><th>状态</th><th>退货时间</th><th>原因备注</th></tr></thead>
+            <tbody>${ret.orders
+              .map(
+                (r) => `<tr>
+                  <td><a href="/returns/${r.id}"><strong>${esc(r.order_no)}</strong></a></td>
+                  <td class="num"><strong>${money(r.total)}</strong></td>
+                  <td>${esc(r.operator_name || "—")}</td>
+                  <td>${orderStatusBadge(r.status)}</td>
+                  <td class="muted small">${fmtDT(r.created_at)}</td>
+                  <td class="muted small">${esc(r.remark || "—")}</td>
+                </tr>`
+              )
+              .join("")}</tbody>
+          </table></div>
+          <div class="items-hint">本单应收 ${money(o.total)} · 已退 ${money(returnedAmount)} · 实际成交 ${money(
+            round2(o.total - returnedAmount)
+          )}${allReturned ? " · 商品已全部退回，不可再次办理退货" : ""}</div>
+        </div>`
+      : "";
+
   return `
     ${pageHead(
       `销售出库单 ${o.order_no}`,
@@ -736,12 +784,16 @@ export function salesDetailPage(
       `<button type="button" class="btn secondary" data-action="print-doc">🖨️ 打印销售单</button>
        ${
          o.status === "done" && (ctx.user?.role === "admin" || ctx.user?.role === "sales")
-           ? `<a class="btn secondary" href="/returns/new?order_no=${encodeURIComponent(o.order_no)}">↩️ 办理退货</a>`
+           ? allReturned
+             ? returnBtnNote
+             : `<a class="btn secondary" href="/returns/new?order_no=${encodeURIComponent(o.order_no)}">↩️ 办理退货</a>`
            : ""
        }
        ${
          o.status === "done" && ctx.user?.role === "customer"
-           ? `<a class="btn secondary" href="/returns/apply?order_id=${o.id}">↩️ 申请退换货</a>`
+           ? allReturned
+             ? returnBtnNote
+             : `<a class="btn secondary" href="/returns/apply?order_id=${o.id}">↩️ 申请退换货</a>`
            : ""
        }
        <a class="btn secondary" href="/sales">← 返回列表</a>
@@ -752,6 +804,7 @@ export function salesDetailPage(
        }`
     )}
     ${debtCard}
+    ${returnCard}
     <div class="card voucher-card">
       <div class="voucher-head">
         <div>
@@ -770,6 +823,11 @@ export function salesDetailPage(
         <div><dt>折后应收总额</dt><dd><strong>${money(o.total)}</strong>${o.discount > 0 ? ` <span class="muted small">（已优惠 ${money(o.discount)}）</span>` : ""}</dd></div>
         <div><dt>累计已收金额</dt><dd class="pos"><strong>${money(o.paid)}</strong></dd></div>
         <div><dt>待收挂账欠款</dt><dd class="${debt > 0 ? "neg" : ""}"><strong>${debt > 0 ? money(debt) : "¥0.00（已结清）"}</strong></dd></div>
+        ${
+          returnedAmount > 0
+            ? `<div><dt>本单已退</dt><dd class="neg"><strong>${money(returnedAmount)}</strong> <span class="muted small">（有效退货单 ${returnedOrders.length} 张，实际成交 ${money(round2(o.total - returnedAmount))}）</span></dd></div>`
+            : ""
+        }
         <div><dt>结算方式</dt><dd>${esc(paymentName(o.payment))}</dd></div>
         <div><dt>收货人 / 电话</dt><dd><strong>${esc(o.shipping_name || "—")}</strong> ${esc(o.shipping_phone || "")}</dd></div>
         <div><dt>收货地址</dt><dd>${esc(o.shipping_address || "门店自提 / 未填地址")}</dd></div>
@@ -779,11 +837,11 @@ export function salesDetailPage(
       <hr class="divider">
       <h3>🧾 销售商品明细${isAdmin ? "（含加权成本与单品毛利，仅管理员可见）" : ""}</h3>
       <div class="table-wrap"><table class="table">
-        <thead><tr><th>序号</th><th>商品名称 / SKU</th><th class="num">数量</th><th class="num">销售单价</th>${isAdmin ? `<th class="num">成本价</th>` : ""}<th class="num">金额小计</th>${isAdmin ? `<th class="num">单品毛利</th>` : ""}</tr></thead>
-        <tbody>${items || emptyRow(isAdmin ? 7 : 5)}</tbody>
+        <thead><tr><th>序号</th><th>商品名称 / SKU</th><th class="num">数量</th>${ret ? `<th class="num">已退数量</th>` : ""}<th class="num">销售单价</th>${isAdmin ? `<th class="num">成本价</th>` : ""}<th class="num">金额小计</th>${isAdmin ? `<th class="num">单品毛利</th>` : ""}</tr></thead>
+        <tbody>${items || emptyRow(isAdmin ? (ret ? 8 : 7) : ret ? 6 : 5)}</tbody>
         <tfoot>
           <tr class="table-foot-row">
-            <td colspan="${isAdmin ? 5 : 4}" class="num"><strong>应收总计（已扣优惠 ${money(o.discount)}）：</strong></td>
+            <td colspan="${isAdmin ? (ret ? 6 : 5) : ret ? 5 : 4}" class="num"><strong>应收总计（已扣优惠 ${money(o.discount)}）：</strong></td>
             <td class="num"><strong>${money(o.total)}</strong></td>
             ${isAdmin ? `<td></td>` : ""}
           </tr>
@@ -840,6 +898,10 @@ export interface ReturnFormData {
   customers: User[];
   defaultOrderNo?: string;
   defaultCustomerId?: number | null;
+  /** 从销售单「办理退货」进入时锁定的原单 id */
+  linkedOrderId?: number;
+  /** 原单每款商品的售出 / 已退 / 可退数量 */
+  returnableLines?: { name: string; sold: number; returned: number; avail: number }[];
   /** 从原销售单带入的退货明细 */
   prefillLines?: { product: Product; qty: number; price?: number }[];
   /** 原销售单校验失败 / 未找到时的提示 */
@@ -860,11 +922,37 @@ export function returnFormPage(ctx: ViewCtx, d: ReturnFormData): string {
 
   const prefill = d.prefillLines || [];
   const hasPrefill = prefill.length > 0;
+  const rl = d.returnableLines || [];
+  const linked = !!d.linkedOrderId;
+  const returnableDetail = rl
+    .map(
+      (x) =>
+        `<div class="small">· ${esc(x.name)}：售出 ${qty(x.sold)} · 已退 ${qty(x.returned)} · 本次可退 <strong>${qty(
+          x.avail
+        )}</strong></div>`
+    )
+    .join("");
   const headHint = hasPrefill
-    ? `↩️ 已按原销售单 <strong>${esc(d.defaultOrderNo || "")}</strong> 自动带入 <strong>${prefill.length}</strong> 款商品，并沿用原成交单价；请修改实际退货数量，不需要退货的行可直接删除。`
+    ? `↩️ 已按原销售单 <strong>${esc(d.defaultOrderNo || "")}</strong> 带入 <strong>${prefill.length}</strong> 款商品的<strong>可退数量</strong>（售出数已扣除历史退货），单价沿用原成交单价；不需要退货的行可直接删除。${
+        rl.length > 1 || rl.some((x) => x.returned > 0) ? returnableDetail : ""
+      }`
     : d.orderHint
-      ? `<span class="neg">${esc(d.orderHint)}</span>`
+      ? `<span class="neg">${esc(d.orderHint)}</span>${returnableDetail ? returnableDetail : ""}`
       : "";
+
+  // 从订单页进入时原单被锁定：单号只读并附隐藏 id，避免清空单号后绕过可退数量校验
+  const orderNoField = linked
+    ? `<input type="hidden" name="sales_order_id" value="${d.linkedOrderId}">` +
+      field(
+        "关联原销售单",
+        `<input type="text" name="sales_order_no" maxlength="32" value="${esc(d.defaultOrderNo || "")}" readonly>`,
+        "由订单页带入，退货数量与单价均按该单校验"
+      )
+    : field(
+        "关联原销售单号",
+        `<input type="text" name="sales_order_no" maxlength="32" placeholder="选填，如 SO202610191234">`,
+        "填写后系统将自动校验原单商品与可退数量；留空即为无原单的零售退货"
+      );
 
   return `
     ${pageHead("＋ 新建销售退货单", "校验原销售单可退数量并自动回补商品库存", `<a class="btn secondary" href="/returns">← 返回退货列表</a>`)}
@@ -872,8 +960,8 @@ export function returnFormPage(ctx: ViewCtx, d: ReturnFormData): string {
       ${csrfInput(ctx.csrf)}
       <div class="card"><h3>📝 退货单头信息</h3>
         <div class="form-row cols-3">
-          ${field("关联原销售单号", `<input type="text" name="sales_order_no" maxlength="32" value="${esc(d.defaultOrderNo || "")}" placeholder="选填，如 SO202610191234">`, "填写后系统将自动校验原单商品与可退数量")}
-          ${field("退货客户", `<select name="customer_id">${cusOptions}</select>`, "若已填原销售单号，将自动关联原单客户")}
+          ${orderNoField}
+          ${field("退货客户", `<select name="customer_id">${cusOptions}</select>`, linked ? "已锁定为原单客户" : "若已填原销售单号，将自动关联原单客户")}
           ${field("退货原因及备注", `<input type="text" name="remark" maxlength="200" placeholder="选填，如：尺码不符 / 包装破损换退">`)}
         </div>
       </div>

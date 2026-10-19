@@ -24,7 +24,7 @@ import {
 import { store, pageCtx, needRoles, parseForm, redirectWith } from "./helpers";
 import { getPagination, clientIP, utc8Range, round2 } from "../lib";
 import { readCart, clearCartCookieHeader } from "../cart";
-import type { Product } from "../db";
+import type { Product, SalesItem } from "../db";
 
 /** 从平行数组组装单据明细（过滤空行） */
 function parseItems(all: (name: string) => string[]): { product_id: number; qty: number; price: number }[] {
@@ -43,6 +43,16 @@ function parseItems(all: (name: string) => string[]): { product_id: number; qty:
 
 function notFound(c: Parameters<typeof pageCtx>[0]) {
   return c.html(errorPage(pageCtx(c), 404, "页面不存在", "请求的单据不存在或已被删除。"), 404);
+}
+
+/** 退货校验失败时退回退货页，并保留原单号，避免重复输入 */
+function backToReturnForm(c: Parameters<typeof pageCtx>[0], orderNo: string, err: string) {
+  return redirectWith(
+    c,
+    `/returns/new${orderNo ? "?order_no=" + encodeURIComponent(orderNo) : ""}`,
+    undefined,
+    err
+  );
 }
 
 export function registerStock(app: Hono<AppEnv>) {
@@ -281,12 +291,20 @@ export function registerStock(app: Hono<AppEnv>) {
       }
       const ctx = pageCtx(c);
       const customerBalance = o.customer_id ? await s.getBalance(o.customer_id) : undefined;
+      // 已完成单才需要展示退货情况：每款已退数量 + 本单退货记录
+      const ret =
+        o.status === "done"
+          ? {
+              returnedQty: await s.returnedQtyByOrder(o.id),
+              orders: await s.listReturnsBySalesOrder(o.id),
+            }
+          : undefined;
       return c.html(
         layout({
           title: `销售单 ${o.order_no}`,
           ctx,
           active: "sales",
-          content: salesDetailPage(ctx, o, me.role === "admin", customerBalance),
+          content: salesDetailPage(ctx, o, me.role === "admin", customerBalance, ret),
         })
       );
     } catch (e) {
@@ -374,22 +392,31 @@ export function registerStock(app: Hono<AppEnv>) {
       ]);
       const soNo = (c.req.query("order_no") || "").trim();
 
-      // 带 order_no 进来时，自动按原销售单带出商品明细与成交单价
+      // 带 order_no 进来时，按原销售单带出「仍可退」的商品明细与成交单价
       let prefillLines: { product: Product; qty: number; price: number }[] = [];
       let defaultCustomerId: number | null = null;
+      let linkedOrderId = 0;
+      let returnableLines: { name: string; sold: number; returned: number; avail: number }[] = [];
       let orderHint = "";
       if (soNo) {
-        const r = await s.listSalesOrders({ q: soNo, page: 1, pageSize: 10 });
-        const hit = r.rows.find((x) => x.order_no === soNo);
-        if (!hit) {
-          orderHint = `未找到销售单号 ${soNo}，请手动选择需要退货的商品。`;
-        } else if (hit.status !== "done") {
+        const linked = await s.getSalesOrderByNo(soNo);
+        if (!linked) {
+          orderHint = `未找到销售单号 ${soNo}，请核对单号，或手动选择需要退货的商品。`;
+        } else if (linked.status !== "done") {
           orderHint = `销售单 ${soNo} 已作废，无法办理退货。`;
         } else {
-          const full = await s.getSalesOrder(hit.id);
-          defaultCustomerId = full?.customer_id ?? null;
+          linkedOrderId = linked.id;
+          defaultCustomerId = linked.customer_id ?? null;
+          const returnable = await s.returnableQtyByOrder(linked.id);
           const byId = new Map(prods.rows.map((p) => [p.id, p]));
-          for (const it of full?.items || []) {
+          const nameOf = new Map<number, string>();
+          // 同一商品在原单里可能有多行，按商品合并，避免预填行相加后超过可退数量
+          const lineMap = new Map<number, { product: Product; qty: number; price: number }>();
+          for (const it of linked.items || []) {
+            const e = returnable.get(it.product_id);
+            if (!e) continue;
+            if (!nameOf.has(it.product_id)) nameOf.set(it.product_id, it.product_name || `#${it.product_id}`);
+            if (e.avail <= 0) continue;
             let p = byId.get(it.product_id);
             if (!p) {
               p = (await s.getProduct(it.product_id)) || undefined;
@@ -398,9 +425,24 @@ export function registerStock(app: Hono<AppEnv>) {
                 prods.rows.push(p);
               }
             }
-            if (p) prefillLines.push({ product: p, qty: it.qty, price: it.price });
+            if (!p) continue;
+            const prev = lineMap.get(it.product_id);
+            lineMap.set(it.product_id, {
+              product: p,
+              qty: e.avail,
+              price: Math.max(prev?.price ?? 0, round2(it.price)),
+            });
           }
-          if (prefillLines.length === 0) orderHint = `销售单 ${soNo} 未查询到可退商品明细，请手动选择。`;
+          prefillLines = [...lineMap.values()];
+          returnableLines = [...returnable].map(([pid, e]) => ({
+            name: nameOf.get(pid) || `#${pid}`,
+            sold: e.sold,
+            returned: e.returned,
+            avail: e.avail,
+          }));
+          if (prefillLines.length === 0) {
+            orderHint = `销售单 ${soNo} 的商品已全部退完（每款售出数量均已退回），无可退数量，无需再次办理退货。`;
+          }
         }
       }
 
@@ -415,6 +457,8 @@ export function registerStock(app: Hono<AppEnv>) {
             customers: customersRes.rows,
             defaultOrderNo: soNo,
             defaultCustomerId,
+            linkedOrderId,
+            returnableLines,
             prefillLines,
             orderHint,
           }),
@@ -430,18 +474,27 @@ export function registerStock(app: Hono<AppEnv>) {
   app.post("/returns/new", async (c) => {
     const me = needRoles(c, ["admin", "sales"]);
     const s = store(c);
+    let soNo = "";
     try {
       const f = await parseForm(c);
       const fields = f.fields;
       const items = parseItems(f.all);
       const customer_id = parseInt(fields.customer_id || "", 10) || null;
+      soNo = (fields.sales_order_no || "").trim();
       let sales_order_id: number | null = null;
-      const soNo = (fields.sales_order_no || "").trim();
-      if (soNo) {
-        const r = await s.listSalesOrders({ q: soNo, page: 1, pageSize: 10 });
-        const hit = r.rows.find((x) => x.order_no === soNo);
-        if (!hit) return redirectWith(c, "/returns/new", undefined, `未找到销售单号 ${soNo}`);
-        sales_order_id = hit.id;
+      const hiddenId = parseInt(fields.sales_order_id || "", 10) || 0;
+      if (hiddenId) {
+        // 从销售单「办理退货」进入：原单已锁定，不允许靠清空单号绕过可退数量校验
+        const so = await s.getSalesOrder(hiddenId);
+        if (!so) return backToReturnForm(c, soNo, "关联的原销售单不存在，请回到订单页重新点击「办理退货」");
+        if (soNo && so.order_no !== soNo) {
+          return backToReturnForm(c, soNo, `填写的单号 ${soNo} 与页面带入的原销售单 ${so.order_no} 不一致，请回到订单页重新点击「办理退货」`);
+        }
+        sales_order_id = so.id;
+      } else if (soNo) {
+        const so = await s.getSalesOrderByNo(soNo);
+        if (!so) return backToReturnForm(c, soNo, `未找到销售单号 ${soNo}，请核对单号；无原单的零售退货请从「＋ 新建退货单」进入`);
+        sales_order_id = so.id;
       }
       const order_no = await s.createReturnOrder({
         sales_order_id,
@@ -454,7 +507,7 @@ export function registerStock(app: Hono<AppEnv>) {
       return redirectWith(c, "/returns", `退货单 ${order_no} 创建成功`);
     } catch (e) {
       if (e instanceof HTTPException) throw e;
-      return redirectWith(c, "/returns/new", undefined, "创建失败：" + (e as Error).message);
+      return backToReturnForm(c, soNo, "创建失败：" + (e as Error).message);
     }
   });
 
@@ -535,10 +588,17 @@ export function registerStock(app: Hono<AppEnv>) {
         s.returnedQtyByOrder(order.id),
         s.pendingQtyByOrder(order.id),
       ]);
-      const rows = (order.items || []).map((item) => {
+      // 按商品聚合后再算可申请数量：已退/待审都是商品级的，逐行相减会在同商品多行时算错
+      const grouped = new Map<number, { item: SalesItem; sold: number }>();
+      for (const item of order.items || []) {
+        const g = grouped.get(item.product_id);
+        if (g) g.sold = round2(g.sold + item.qty);
+        else grouped.set(item.product_id, { item, sold: round2(item.qty) });
+      }
+      const rows = [...grouped.values()].map(({ item, sold }) => {
         const r = round2(returned.get(item.product_id) || 0);
         const p = round2(pending.get(item.product_id) || 0);
-        return { item, returned: r, pending: p, avail: round2(item.qty - r - p) };
+        return { item: { ...item, qty: sold }, returned: r, pending: p, avail: round2(sold - r - p) };
       });
       const ctx = pageCtx(c);
       return c.html(
