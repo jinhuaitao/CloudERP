@@ -14,6 +14,29 @@ import { registerSystem } from "./routes/system";
 
 const app = new Hono<AppEnv>();
 
+// ---------- 平台域名校验文件（微信公众平台等）----------
+// 只读环境变量 VERIFY_FILES，格式「文件名=内容」，多条以分号或换行分隔；换校验码不需要改代码或重新构建。
+// 注册在安全头与认证中间件之前：命中的请求不建表、不查会话、不重定向；未命中则原样落回后续中间件链。
+// Hono 的 `/*.txt` 通配不参与匹配，故用 /* 自行按路径后缀判定。
+function parseVerifyFiles(raw: string | undefined): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const item of (raw || "").split(/[;\n]/)) {
+    const i = item.indexOf("=");
+    if (i < 0) continue;
+    const name = item.slice(0, i).trim().replace(/^\/+/, "");
+    const content = item.slice(i + 1).trim();
+    if (name && content && !name.includes("/")) map.set(name, content);
+  }
+  return map;
+}
+
+app.get("/*", (c, next) => {
+  const name = new URL(c.req.url).pathname.slice(1);
+  if (!name.endsWith(".txt") || name.includes("/")) return next();
+  const content = parseVerifyFiles(c.env.VERIFY_FILES).get(name);
+  return content ? c.text(content, 200, { "Cache-Control": "no-store" }) : next();
+});
+
 // ---------- 安全响应头 ----------
 app.use("*", async (c, next) => {
   await next();

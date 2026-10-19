@@ -39,6 +39,10 @@
     "REMEMBER_TTL_DAYS": "30",
     "MAX_LOGIN_ATTEMPTS": "5",
     "LOCK_MINUTES": "15",
-    "MAX_UPLOAD_MB": "5"
+    "MAX_UPLOAD_MB": "5",
+    // 平台域名校验文件（微信公众平台「网站管理员认证」等）：格式「根目录文件名=文件内容」，
+    // 多个平台用分号或换行分隔。换校验码只需改这一处，不必改代码；
+    // 也可在 Cloudflare 控制台 Workers → Settings → Variables and Secrets 直接改，改完即时生效无需重新部署。
+    "VERIFY_FILES": "120f88d6c94e046b49596b35cd8983ee.txt=a5108566aaea97a770e4e9ed1e55340af336f44c"
   }
 }

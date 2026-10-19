@@ -104,7 +104,7 @@ npm run typecheck
 
 - 首次打开访问 `/setup` 创建管理员账号。
 - CLI 与 `wrangler dev` 必须使用同一个 `--persist-to` 目录，否则两边操作的是不同的本地 D1 副本。
-- 环境变量都在 `wrangler.jsonc` 的 `vars`（会话时长、登录失败锁定、上传大小上限等），无密钥需要配置；`CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` 仅 `ensure-r2.mjs` 建桶时使用。
+- 环境变量都在 `wrangler.jsonc` 的 `vars`（会话时长、登录失败锁定、上传大小上限、`VERIFY_FILES` 域名校验文件等），无密钥需要配置；`CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` 仅 `ensure-r2.mjs` 建桶时使用。
 
 ## 部署
 
@@ -115,6 +115,19 @@ npm run deploy:ci
 
 - `wrangler.jsonc` 故意不写 D1 `database_id`：首次 deploy 会自动供给数据库；R2 桶由 `scripts/ensure-r2.mjs` 建。
 - 定时任务：每小时清理过期会话与登录 / 找回记录；每天 03:00 UTC 自动全量备份到 `backups/auto-*.json`（文件名按东八区时间生成），并按设置项 `backup_keep`（默认 14 份）裁剪超出部分。
+
+## 域名校验文件（微信等平台）
+
+平台要求「在网站根目录放一个 txt 文件」做归属认证时（如微信公众平台的网站管理员认证），不需要放文件也不需要改代码——文件名与内容全部由环境变量 `VERIFY_FILES` 决定：
+
+```
+VERIFY_FILES = 120f88d6c94e046b49596b35cd8983ee.txt=a5108566aaea97a770e4e9ed1e55340af336f44c
+```
+
+- 格式为「根目录文件名=文件内容」，多个平台用分号或换行分隔，条目两侧空格与文件名的前导 `/` 会被忽略；缺 `=` 的条目直接跳过。
+- **换校验码只改这一处**：Cloudflare 控制台 → Workers → `jinxiao-system` → Settings → Variables and Defaults → 编辑 `VERIFY_FILES` → Save，保存即生效，不用重新部署；默认值写在 `wrangler.jsonc` 的 `vars` 里，改完要 `npx wrangler deploy` 才会更新到新部署。
+- 命中时直接返回 `text/plain` 原文（无多余换行、`Cache-Control: no-store`），且不建表、不查会话、不重定向，未登录的爬虫也能取到；未命中的 `.txt` 走正常路由链。
+- 自检：`curl https://你的域名/<文件名>.txt` 应逐字返回内容串。
 
 ## 安全
 

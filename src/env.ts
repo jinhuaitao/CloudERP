@@ -8,6 +8,8 @@ export interface Env {
   MAX_LOGIN_ATTEMPTS?: string;
   LOCK_MINUTES?: string;
   MAX_UPLOAD_MB?: string;
+  /** 平台域名校验文件，格式「文件名=内容」，多条用分号或换行分隔 */
+  VERIFY_FILES?: string;
 }
 
 // 脱敏后的登录用户信息（放进请求上下文）
