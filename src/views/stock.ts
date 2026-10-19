@@ -15,10 +15,12 @@ import type {
   Product,
   PurchaseOrder,
   SalesOrder,
+  SalesItem,
   ReturnOrder,
+  ReturnRequest,
   StockMovement,
 } from "../db";
-import { movementTypeName, paymentName } from "../db";
+import { movementTypeName, paymentName, requestStatusName, requestTypeName } from "../db";
 import { fileUrl } from "./products";
 
 function orderStatusBadge(status: string): string {
@@ -36,7 +38,7 @@ function tp(total: number, pageSize: number): number {
 export function paymentQrWidget(
   ctx: ViewCtx,
   activeMethod?: string,
-  heading = "📲 收款信息（微信 / 支付宝 / 银行转账）"
+  heading = "💳 结算与收款信息"
 ): string {
   const wechatKey = ctx.settings?.wechat_qr_key || "";
   const alipayKey = ctx.settings?.alipay_qr_key || "";
@@ -194,6 +196,8 @@ export interface OrderItemsOptions {
   headHint?: string;
   /** 锁定单价（客户自助下单按系统售价结算） */
   lockPrice?: boolean;
+  /** 允许把明细行全部删空（自助下单场景），删空后显示占位提示 */
+  allowEmptyRows?: boolean;
 }
 
 function orderItemsBlock(
@@ -249,7 +253,12 @@ function orderItemsBlock(
       <span class="num">行小计</span>
       <span></span>
     </div>
-    <div id="orderItems">${rows}</div>
+    <div id="orderItems"${opts.allowEmptyRows ? ' data-allow-empty="1"' : ""}>${rows}</div>
+    ${
+      opts.allowEmptyRows
+        ? `<div class="items-empty" data-role="items-empty" hidden>🛒 商品明细已清空，点击下方「＋ 继续添加商品」重新选购</div>`
+        : ""
+    }
     <div class="order-summary-bar">
       ${bottomAdd}
       <div class="order-total" id="orderTotal">合计：<span>¥0.00</span></div>
@@ -485,6 +494,19 @@ export interface SalesFormData {
   };
 }
 
+/** 客户自助下单可用的结算方式：
+ *  微信 / 支付宝 / 银行转账只有商家在系统设置里配置过才展示，未配置直接不出现在下拉框。 */
+export function customerPayMethods(ctx: ViewCtx): string[] {
+  const s = ctx.settings || {};
+  const has = (v?: string) => !!(v || "").trim();
+  const list: string[] = ["balance"];
+  if (has(s.wechat_qr_key)) list.push("wechat");
+  if (has(s.alipay_qr_key)) list.push("alipay");
+  if (has(s.bank_account_name) || has(s.bank_name) || has(s.bank_account_no)) list.push("bank");
+  list.push("cash", "credit");
+  return list;
+}
+
 export function salesFormPage(ctx: ViewCtx, d: SalesFormData): string {
   const sellable = d.products.filter((p) => p.status === "on");
   const isCustomer = d.forCustomer;
@@ -532,13 +554,22 @@ export function salesFormPage(ctx: ViewCtx, d: SalesFormData): string {
           "选择后将按二级分销规则自动生成销售提成与上级津贴"
         );
 
-  // 结算方式：余额支付按客户可用余额展示，选中客户后由 app.js 实时刷新
+  // 结算方式：客户自助下单只列出「已配置」的渠道，并默认选中余额支付（余额为 0 时回退到首个可用渠道）
   const myBalance = round2(cp?.balance ?? ctx.user?.balance ?? 0);
-  const payOptions = ["wechat", "alipay", "cash", "bank", "balance", "credit"]
+  const payMethods = isCustomer ? customerPayMethods(ctx) : ["wechat", "alipay", "cash", "bank", "balance", "credit"];
+  const fallbackPay = payMethods.find((k) => k !== "balance") || "balance";
+  const defaultPay = isCustomer ? (myBalance > 0 ? "balance" : fallbackPay) : "wechat";
+  const payOptions = payMethods
     .map((k) => {
-      if (k !== "balance") return `<option value="${k}">${esc(paymentName(k))}</option>`;
-      const label = isCustomer ? `余额支付（可用 ¥${myBalance.toFixed(2)}）` : "余额支付（扣客户余额）";
-      return `<option value="${k}" data-balance-opt="1">${esc(label)}</option>`;
+      const label =
+        k === "balance"
+          ? isCustomer
+            ? `余额支付（可用 ¥${myBalance.toFixed(2)}）`
+            : "余额支付（扣客户余额）"
+          : paymentName(k);
+      return `<option value="${k}"${k === defaultPay ? " selected" : ""}${k === "balance" ? ' data-balance-opt="1"' : ""}>${esc(
+        label
+      )}</option>`;
     })
     .join("");
 
@@ -598,7 +629,7 @@ export function salesFormPage(ctx: ViewCtx, d: SalesFormData): string {
                 )}
                 ${field("订单备注", `<input type="text" name="remark" maxlength="200" placeholder="选填，如期望送达时间、发票抬头等">`)}
               </div>
-              ${paymentQrWidget(ctx, "wechat")}
+              ${paymentQrWidget(ctx, defaultPay)}
             </div>`
           : `<div class="card"><h3>📝 客户与结算信息</h3>
               <div class="form-row">
@@ -632,10 +663,11 @@ export function salesFormPage(ctx: ViewCtx, d: SalesFormData): string {
               addRowHref: "/catalog",
               headHint: cartHint,
               lockPrice: true,
+              allowEmptyRows: true,
             })
           : orderItemsBlock(sellable, "sale_price", { preselectPid: d.preselectPid })
       }
-      <div class="btn-row">
+      <div class="btn-row" id="orderSubmitBar">
         <button class="btn primary" type="submit">${isCustomer ? "🛒 确认提交订单" : "✅ 确认开单并出库"}</button>
         <a class="btn secondary" href="/sales">取消</a>
       </div>
@@ -705,6 +737,11 @@ export function salesDetailPage(
        ${
          o.status === "done" && (ctx.user?.role === "admin" || ctx.user?.role === "sales")
            ? `<a class="btn secondary" href="/returns/new?order_no=${encodeURIComponent(o.order_no)}">↩️ 办理退货</a>`
+           : ""
+       }
+       ${
+         o.status === "done" && ctx.user?.role === "customer"
+           ? `<a class="btn secondary" href="/returns/apply?order_id=${o.id}">↩️ 申请退换货</a>`
            : ""
        }
        <a class="btn secondary" href="/sales">← 返回列表</a>
@@ -905,6 +942,257 @@ export function returnDetailPage(ctx: ViewCtx, o: ReturnOrder, canVoid = false):
         <tbody>${items || emptyRow(5)}</tbody>
       </table></div>
     </div>`;
+}
+
+// ================= 客户退换货申请（客户提交 → 管理员审核） =================
+
+function reqStatusBadge(s: string): string {
+  const kind = s === "approved" ? "green" : s === "rejected" ? "red" : s === "cancelled" ? "gray" : "yellow";
+  return badge(requestStatusName(s), kind as "green" | "red" | "gray" | "yellow");
+}
+function reqTypeBadge(t: string): string {
+  return badge(requestTypeName(t), t === "exchange" ? "blue" : "gray");
+}
+
+export interface RequestApplyRow {
+  item: SalesItem;
+  returned: number;
+  pending: number;
+  avail: number;
+}
+
+/** 客户提交退换货申请 */
+export function returnApplyPage(
+  ctx: ViewCtx,
+  d: { order: SalesOrder; rows: RequestApplyRow[]; type: string; reason: string; error?: string }
+): string {
+  const rows = d.rows
+    .map(({ item, returned, pending, avail }) => {
+      const disabled = avail <= 0;
+      return `<tr>
+        <td><strong>${esc(item.product_name || "—")}</strong>${item.sku ? `<br><span class="muted small">SKU: ${esc(item.sku)}</span>` : ""}</td>
+        <td class="num col-hide-sm">${money(item.price)}</td>
+        <td class="num col-hide-sm">${qty(item.qty)} ${esc(item.unit || "")}</td>
+        <td class="num">
+          <strong class="${avail > 0 ? "pos" : "muted"}">${qty(avail)}</strong>
+          ${
+            returned > 0 || pending > 0
+              ? `<div class="muted small">已退 ${qty(returned)}${pending > 0 ? ` · 待审 ${qty(pending)}` : ""}</div>`
+              : ""
+          }
+        </td>
+        <td>
+          <input type="hidden" name="product_id" value="${item.product_id}">
+          <input type="number" class="qty-input" name="qty" min="0" max="${avail}" step="0.01" value="0"${disabled ? " disabled" : ""}>
+        </td>
+      </tr>`;
+    })
+    .join("");
+
+  const typeRadio = (k: string, label: string, desc: string) => `
+    <label class="radio-card${d.type === k ? " active" : ""}">
+      <input type="radio" name="type" value="${k}"${d.type === k ? " checked" : ""}>
+      <span><strong>${label}</strong><br><span class="muted small">${desc}</span></span>
+    </label>`;
+
+  return `
+    ${pageHead(
+      "↩️ 申请退换货",
+      `原销售单 ${d.order.order_no} · ${d.order.items?.length || 0} 款商品`,
+      `<a class="btn secondary" href="/sales/${d.order.id}">← 返回订单详情</a>`
+    )}
+    ${d.error ? `<div class="flash err">${esc(d.error)}</div>` : ""}
+    <form method="post" action="/returns/apply">
+      ${csrfInput(ctx.csrf)}
+      <input type="hidden" name="order_id" value="${d.order.id}">
+      <div class="card"><h3>📝 申请信息</h3>
+        <div class="radio-cards">
+          ${typeRadio("return", "🔄 退货退款", "商品退回，商家审核通过后回补库存并按原成交价退款")}
+          ${typeRadio("exchange", "🔁 换货", "商品退回后由商家重新寄出同款或等价商品")}
+        </div>
+        ${field(
+          "退换货原因",
+          `<textarea name="reason" rows="3" maxlength="300" placeholder="请描述具体问题，如：收到时外包装破损、颜色与图片不符、尺寸偏小等" required>${esc(
+            d.reason
+          )}</textarea>`,
+          "请尽量描述清楚，便于商家快速审核处理",
+          true
+        )}
+      </div>
+      <div class="card">
+        <div class="card-head"><h3>🧾 选择需要退换的商品</h3><span class="muted small">数量填 0 表示不申请</span></div>
+        <div class="table-wrap"><table class="table">
+          <thead><tr><th>商品名称 / SKU</th><th class="num col-hide-sm">成交单价</th><th class="num col-hide-sm">已购数量</th><th class="num">可申请数量</th><th>本次申请数量</th></tr></thead>
+          <tbody>${rows || emptyRow(5, "该订单没有可申请退换的商品")}</tbody>
+        </table></div>
+      </div>
+      <div class="btn-row">
+        <button class="btn primary" type="submit">📮 提交申请</button>
+        <a class="btn secondary" href="/sales/${d.order.id}">取消</a>
+      </div>
+    </form>`;
+}
+
+/** 退换货申请列表（管理员/销售看全部，客户只看自己的） */
+export function returnRequestListPage(
+  ctx: ViewCtx,
+  d: {
+    rows: ReturnRequest[];
+    total: number;
+    page: number;
+    pageSize: number;
+    status: string;
+    forCustomer: boolean;
+    pendingCount?: number;
+  }
+): string {
+  const statusOptions = [
+    ["", "全部状态"],
+    ["pending", "待审核"],
+    ["approved", "已通过"],
+    ["rejected", "已驳回"],
+    ["cancelled", "已撤销"],
+  ]
+    .map(([v, label]) => `<option value="${v}"${d.status === v ? " selected" : ""}>${label}</option>`)
+    .join("");
+
+  const rows =
+    d.rows.length > 0
+      ? d.rows
+          .map((r) => {
+            const act = d.forCustomer
+              ? r.status === "pending"
+                ? `<form class="inline-form" method="post" action="/returns/my/${r.id}/cancel" data-confirm="确定撤销这条退换货申请吗？">${csrfInput(
+                    ctx.csrf
+                  )}<button class="btn small danger" type="submit">撤销</button></form>`
+                : `<a class="btn small secondary" href="/returns/my/${r.id}">查看</a>`
+              : `<a class="btn small ${r.status === "pending" ? "primary" : "secondary"}" href="/returns/requests/${r.id}">${
+                  r.status === "pending" ? "审核" : "查看"
+                }</a>`;
+            return `<tr>
+              <td><a href="${d.forCustomer ? "/returns/my" : "/returns/requests"}/${r.id}"><strong>${esc(r.request_no)}</strong></a></td>
+              ${d.forCustomer ? "" : `<td><strong>${esc(r.customer_name || "—")}</strong><div class="muted small">@${esc(r.customer_username || "")}</div></td>`}
+              <td><a href="/sales/${r.sales_order_id}">${esc(r.sales_order_no)}</a></td>
+              <td>${reqTypeBadge(r.type)}</td>
+              <td class="num"><strong>${money(r.total)}</strong></td>
+              <td>${reqStatusBadge(r.status)}</td>
+              <td class="muted small" style="white-space:nowrap">${fmtDT(r.created_at)}</td>
+              <td>${act}</td>
+            </tr>`;
+          })
+          .join("")
+      : emptyRow(d.forCustomer ? 7 : 8, "暂无退换货申请");
+
+  return `
+    ${pageHead(
+      d.forCustomer ? "↩️ 我的退换货申请" : "📮 客户退换货审核",
+      d.forCustomer
+        ? `共 ${d.total} 条申请 · 提交后由商家审核，审核通过将自动回补库存`
+        : `共 ${d.total} 条申请${d.pendingCount ? ` · ${d.pendingCount} 条待审核` : ""}`,
+      d.forCustomer
+        ? `<a class="btn secondary" href="/sales">← 我的订单</a>`
+        : `<a class="btn secondary" href="/returns">↩️ 销售退货单</a>`
+    )}
+    <form class="toolbar" method="get" action="${d.forCustomer ? "/returns/my" : "/returns/requests"}">
+      <select name="status">${statusOptions}</select>
+      <button class="btn primary" type="submit">筛选</button>
+      ${d.status ? `<a class="btn secondary" href="${d.forCustomer ? "/returns/my" : "/returns/requests"}">重置</a>` : ""}
+    </form>
+    <div class="card"><div class="table-wrap"><table class="table">
+      <thead><tr><th>申请单号</th>${d.forCustomer ? "" : "<th>客户</th>"}<th>原销售单</th><th>类型</th><th class="num">申请金额</th><th>状态</th><th>提交时间</th><th>操作</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>
+    ${pagerHtml(d.forCustomer ? "/returns/my" : "/returns/requests", { status: d.status }, d.page, Math.max(1, Math.ceil(d.total / d.pageSize)))}
+    </div>`;
+}
+
+/** 退换货申请详情 + 审核操作 */
+export function returnRequestDetailPage(
+  ctx: ViewCtx,
+  d: { req: ReturnRequest; canReview: boolean; isOwner: boolean }
+): string {
+  const r = d.req;
+  const items = r.items
+    .map(
+      (it, i) => `<tr>
+        <td>${i + 1}</td>
+        <td><strong>${esc(it.name || "—")}</strong>${it.sku ? `<br><span class="muted small">SKU: ${esc(it.sku)}</span>` : ""}</td>
+        <td class="num">${qty(it.qty)} ${esc(it.unit || "")}</td>
+        <td class="num">${money(it.price)}</td>
+        <td class="num"><strong>${money(round2(it.qty * it.price))}</strong></td>
+      </tr>`
+    )
+    .join("");
+
+  const reviewCard =
+    d.canReview && r.status === "pending"
+      ? `<div class="card highlight-card">
+          <h3>🔍 审核处理</h3>
+          <form method="post" action="/returns/requests/${r.id}/review">
+            ${csrfInput(ctx.csrf)}
+            ${field("审核意见 / 驳回原因", `<input type="text" name="remark" maxlength="200" placeholder="选填；驳回时建议填写原因，客户可在详情页看到">`, "")}
+            <div class="btn-row">
+              <button class="btn success" type="submit" name="action" value="approve" data-confirm="通过后将自动生成正式退货单并回补商品库存，确定通过吗？">✅ 审核通过并生成退货单</button>
+              <button class="btn danger" type="submit" name="action" value="reject" data-confirm="确定驳回该退换货申请吗？">✖ 驳回申请</button>
+            </div>
+          </form>
+        </div>`
+      : d.isOwner && r.status === "pending"
+        ? `<div class="card"><h3>⏳ 等待商家审核</h3>
+            <p class="muted small">申请已提交，商家审核后会在此显示结果。如需撤回，可点击下方按钮撤销。</p>
+            <form method="post" action="/returns/my/${r.id}/cancel" data-confirm="确定撤销这条退换货申请吗？">${csrfInput(
+              ctx.csrf
+            )}<button class="btn danger" type="submit">撤销申请</button></form>
+          </div>`
+        : "";
+
+  const resultCard =
+    r.status === "approved"
+      ? `<div class="card highlight-card"><h3>✅ 审核已通过</h3>
+          <p class="muted small">${
+            r.return_order_id
+              ? `已自动生成退货单 <a href="/returns/${r.return_order_id}"><strong>查看退货单</strong></a>，商品库存已回补。`
+              : "商家已确认，请留意后续处理。"
+          }${r.type === "exchange" ? "换货商品将由商家另行安排寄出。" : "退款将由商家按原支付方式或余额退回。"}</p>
+          ${r.review_remark ? `<p class="small">审核意见：${esc(r.review_remark)}</p>` : ""}
+        </div>`
+      : r.status === "rejected"
+        ? `<div class="card"><h3>✖ 申请已驳回</h3><p class="small">${esc(r.review_remark || "商家未通过该申请")}</p></div>`
+        : r.status === "cancelled"
+          ? `<div class="card"><h3>已撤销</h3><p class="muted small">该申请已被客户撤销。</p></div>`
+          : "";
+
+  return `
+    ${pageHead(
+      `退换货申请 ${r.request_no}`,
+      `提交时间：${fmtDT(r.created_at)}`,
+      d.canReview
+        ? `<a class="btn secondary" href="/returns/requests">← 返回审核列表</a>`
+        : `<a class="btn secondary" href="/returns/my">← 我的退换货</a>`
+    )}
+    <div class="card"><h3>📋 申请信息 ${reqStatusBadge(r.status)}</h3>
+      <dl class="kv kv-grid">
+        <div><dt>申请类型</dt><dd>${reqTypeBadge(r.type)}</dd></div>
+        <div><dt>原销售单</dt><dd><a href="/sales/${r.sales_order_id}"><strong>${esc(r.sales_order_no)}</strong></a></dd></div>
+        <div><dt>申请人</dt><dd><strong>${esc(r.customer_name || "—")}</strong></dd></div>
+        <div><dt>申请退款金额</dt><dd><strong>${money(r.total)}</strong></dd></div>
+        <div style="grid-column: 1 / -1"><dt>申请原因</dt><dd>${esc(r.reason || "—")}</dd></div>
+        ${
+          r.reviewed_at
+            ? `<div><dt>审核人</dt><dd>${esc(r.reviewer_name || "—")}</dd></div>
+               <div><dt>审核时间</dt><dd>${fmtDT(r.reviewed_at)}</dd></div>`
+            : ""
+        }
+      </dl>
+      <hr class="divider">
+      <h3>🧾 申请退换的商品</h3>
+      <div class="table-wrap"><table class="table">
+        <thead><tr><th>序号</th><th>商品名称 / SKU</th><th class="num">数量</th><th class="num">成交单价</th><th class="num">小计</th></tr></thead>
+        <tbody>${items || emptyRow(5)}</tbody>
+      </table></div>
+    </div>
+    ${resultCard}
+    ${reviewCard}`;
 }
 
 // ================= 库存流水 =================

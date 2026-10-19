@@ -13,12 +13,16 @@ import {
   returnListPage,
   returnFormPage,
   returnDetailPage,
+  returnApplyPage,
+  returnRequestListPage,
+  returnRequestDetailPage,
+  customerPayMethods,
   movementPage,
   adjustPage,
   warningPage,
 } from "../views/stock";
 import { store, pageCtx, needRoles, parseForm, redirectWith } from "./helpers";
-import { getPagination, clientIP, utc8Range } from "../lib";
+import { getPagination, clientIP, utc8Range, round2 } from "../lib";
 import { readCart, clearCartCookieHeader } from "../cart";
 import type { Product } from "../db";
 
@@ -454,6 +458,233 @@ export function registerStock(app: Hono<AppEnv>) {
     }
   });
 
+  // ================= 客户退换货申请（客户提交 → 管理员审核） =================
+  app.get("/returns/my", async (c) => {
+    try {
+      const me = needRoles(c, ["customer"]);
+      const s = store(c);
+      const { page, pageSize } = getPagination(c);
+      const status = (c.req.query("status") || "").trim();
+      const res = await s.listReturnRequests({
+        page,
+        pageSize,
+        customerId: me.id,
+        status: status || undefined,
+      });
+      const ctx = pageCtx(c);
+      return c.html(
+        layout({
+          title: "我的退换货申请",
+          ctx,
+          active: "my-returns",
+          content: returnRequestListPage(ctx, {
+            rows: res.rows,
+            total: res.total,
+            page,
+            pageSize,
+            status,
+            forCustomer: true,
+          }),
+        })
+      );
+    } catch (e) {
+      if (e instanceof HTTPException) throw e;
+      const ctx = pageCtx(c);
+      return c.html(errorPage(ctx, 500, "出错了", "加载退换货申请失败：" + (e as Error).message), 500);
+    }
+  });
+
+  app.get("/returns/my/:id", async (c) => {
+    try {
+      const me = needRoles(c, ["customer"]);
+      const s = store(c);
+      const id = parseInt(c.req.param("id") || "", 10) || 0;
+      const req = id ? await s.getReturnRequest(id) : null;
+      if (!req || req.customer_id !== me.id) return notFound(c);
+      const ctx = pageCtx(c);
+      return c.html(
+        layout({
+          title: `退换货申请 ${req.request_no}`,
+          ctx,
+          active: "my-returns",
+          content: returnRequestDetailPage(ctx, { req, canReview: false, isOwner: true }),
+        })
+      );
+    } catch (e) {
+      if (e instanceof HTTPException) throw e;
+      const ctx = pageCtx(c);
+      return c.html(errorPage(ctx, 500, "出错了", "加载申请详情失败：" + (e as Error).message), 500);
+    }
+  });
+
+  app.get("/returns/apply", async (c) => {
+    try {
+      const me = needRoles(c, ["customer"]);
+      const s = store(c);
+      const orderId = parseInt(c.req.query("order_id") || "", 10) || 0;
+      const order = orderId ? await s.getSalesOrder(orderId) : null;
+      if (!order || order.customer_id !== me.id) return notFound(c);
+      if (order.status !== "done") {
+        const ctx = pageCtx(c);
+        return c.html(
+          errorPage(ctx, 400, "无法申请", "该订单已作废，不能申请退换货。"),
+          400
+        );
+      }
+      const [returned, pending] = await Promise.all([
+        s.returnedQtyByOrder(order.id),
+        s.pendingQtyByOrder(order.id),
+      ]);
+      const rows = (order.items || []).map((item) => {
+        const r = round2(returned.get(item.product_id) || 0);
+        const p = round2(pending.get(item.product_id) || 0);
+        return { item, returned: r, pending: p, avail: round2(item.qty - r - p) };
+      });
+      const ctx = pageCtx(c);
+      return c.html(
+        layout({
+          title: "申请退换货",
+          ctx,
+          active: "my-returns",
+          content: returnApplyPage(ctx, { order, rows, type: "return", reason: "" }),
+        })
+      );
+    } catch (e) {
+      if (e instanceof HTTPException) throw e;
+      const ctx = pageCtx(c);
+      return c.html(errorPage(ctx, 500, "出错了", "加载申请页失败：" + (e as Error).message), 500);
+    }
+  });
+
+  app.post("/returns/apply", async (c) => {
+    const me = needRoles(c, ["customer"]);
+    const s = store(c);
+    let orderId = 0;
+    try {
+      const f = await parseForm(c);
+      const fields = f.fields;
+      orderId = parseInt(fields.order_id || "", 10) || 0;
+      const items = parseItems(f.all).map((it) => ({ product_id: it.product_id, qty: it.qty }));
+      const request_no = await s.createReturnRequest({
+        customer_id: me.id,
+        sales_order_id: orderId,
+        type: (fields.type || "return").trim(),
+        reason: (fields.reason || "").trim(),
+        items,
+      });
+      await s.audit(me.id, "提交退换货申请", "退换货", `提交退换货申请 ${request_no}`, clientIP(c));
+      return redirectWith(c, "/returns/my", `退换货申请 ${request_no} 已提交，请等待商家审核`);
+    } catch (e) {
+      if (e instanceof HTTPException) throw e;
+      return redirectWith(
+        c,
+        orderId ? `/returns/apply?order_id=${orderId}` : "/sales",
+        undefined,
+        "提交失败：" + (e as Error).message
+      );
+    }
+  });
+
+  app.post("/returns/my/:id/cancel", async (c) => {
+    const me = needRoles(c, ["customer"]);
+    const s = store(c);
+    const id = parseInt(c.req.param("id") || "", 10) || 0;
+    try {
+      await parseForm(c);
+      await s.cancelReturnRequest(id, me.id);
+      await s.audit(me.id, "撤销退换货申请", "退换货", `撤销退换货申请 #${id}`, clientIP(c));
+      return redirectWith(c, "/returns/my", "申请已撤销");
+    } catch (e) {
+      if (e instanceof HTTPException) throw e;
+      return redirectWith(c, "/returns/my", undefined, "撤销失败：" + (e as Error).message);
+    }
+  });
+
+  app.get("/returns/requests", async (c) => {
+    try {
+      const me = needRoles(c, ["admin", "sales"]);
+      const s = store(c);
+      const { page, pageSize } = getPagination(c);
+      const status = (c.req.query("status") || "").trim();
+      const [res, pendingRes] = await Promise.all([
+        s.listReturnRequests({ page, pageSize, status: status || undefined }),
+        s.listReturnRequests({ page: 1, pageSize: 1, status: "pending" }),
+      ]);
+      const ctx = pageCtx(c);
+      return c.html(
+        layout({
+          title: "退换货审核",
+          ctx,
+          active: me.role === "admin" ? "return-requests" : "return-requests-sales",
+          content: returnRequestListPage(ctx, {
+            rows: res.rows,
+            total: res.total,
+            page,
+            pageSize,
+            status,
+            forCustomer: false,
+            pendingCount: pendingRes.total,
+          }),
+        })
+      );
+    } catch (e) {
+      if (e instanceof HTTPException) throw e;
+      const ctx = pageCtx(c);
+      return c.html(errorPage(ctx, 500, "出错了", "加载退换货申请失败：" + (e as Error).message), 500);
+    }
+  });
+
+  app.get("/returns/requests/:id", async (c) => {
+    try {
+      const me = needRoles(c, ["admin", "sales"]);
+      const s = store(c);
+      const id = parseInt(c.req.param("id") || "", 10) || 0;
+      const req = id ? await s.getReturnRequest(id) : null;
+      if (!req) return notFound(c);
+      const ctx = pageCtx(c);
+      return c.html(
+        layout({
+          title: `退换货申请 ${req.request_no}`,
+          ctx,
+          active: me.role === "admin" ? "return-requests" : "return-requests-sales",
+          content: returnRequestDetailPage(ctx, { req, canReview: me.role === "admin", isOwner: false }),
+        })
+      );
+    } catch (e) {
+      if (e instanceof HTTPException) throw e;
+      const ctx = pageCtx(c);
+      return c.html(errorPage(ctx, 500, "出错了", "加载申请详情失败：" + (e as Error).message), 500);
+    }
+  });
+
+  app.post("/returns/requests/:id/review", async (c) => {
+    const me = needRoles(c, ["admin"]);
+    const s = store(c);
+    const id = parseInt(c.req.param("id") || "", 10) || 0;
+    try {
+      const { fields } = await parseForm(c);
+      const action = fields.action === "reject" ? "reject" : "approve";
+      const r = await s.reviewReturnRequest(id, action, me.id, (fields.remark || "").trim());
+      await s.audit(
+        me.id,
+        action === "approve" ? "通过退换货申请" : "驳回退换货申请",
+        "退换货",
+        `申请 #${id} ${action === "approve" ? "审核通过" : "已驳回"}`,
+        clientIP(c)
+      );
+      return redirectWith(
+        c,
+        `/returns/requests/${id}`,
+        action === "approve"
+          ? `审核通过，已生成退货单 ${r.returnOrderNo} 并回补库存`
+          : "已驳回该退换货申请"
+      );
+    } catch (e) {
+      if (e instanceof HTTPException) throw e;
+      return redirectWith(c, `/returns/requests/${id}`, undefined, "审核失败：" + (e as Error).message);
+    }
+  });
+
   app.get("/returns/:id", async (c) => {
     try {
       const me = needRoles(c, ["admin", "sales"]);
@@ -660,7 +891,12 @@ export function registerStock(app: Hono<AppEnv>) {
         if (!p) return redirectWith(c, "/shop", undefined, "部分商品已下架，请返回商品目录重新选择");
         pricedItems.push({ product_id: it.product_id, qty: it.qty, price: p.sale_price });
       }
-      const payment = (fields.payment || "").trim() || "wechat";
+      const payment = (fields.payment || "").trim();
+      // 只接受当前「已配置」的结算方式，避免提交未开放的渠道
+      const allowedPay = customerPayMethods(pageCtx(c));
+      if (!payment || !allowedPay.includes(payment)) {
+        return redirectWith(c, "/shop", undefined, "请选择有效的结算方式");
+      }
       const order_no = await s.createSalesOrder({
         customer_id: me.id,
         sales_id: null,

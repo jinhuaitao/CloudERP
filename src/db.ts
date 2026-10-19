@@ -47,6 +47,26 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       )`,
       "CREATE INDEX IF NOT EXISTS idx_balance_logs_user ON balance_logs(user_id, id)",
       "CREATE INDEX IF NOT EXISTS idx_balance_logs_ref ON balance_logs(ref_type, ref_id)",
+      `CREATE TABLE IF NOT EXISTS return_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        request_no TEXT NOT NULL UNIQUE,
+        customer_id INTEGER NOT NULL,
+        sales_order_id INTEGER NOT NULL,
+        sales_order_no TEXT NOT NULL DEFAULT '',
+        type TEXT NOT NULL DEFAULT 'return',
+        reason TEXT NOT NULL DEFAULT '',
+        items_json TEXT NOT NULL DEFAULT '[]',
+        total REAL NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'pending',
+        return_order_id INTEGER,
+        review_remark TEXT NOT NULL DEFAULT '',
+        reviewer_id INTEGER,
+        reviewed_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+      )`,
+      "CREATE INDEX IF NOT EXISTS idx_return_requests_customer ON return_requests(customer_id, id)",
+      "CREATE INDEX IF NOT EXISTS idx_return_requests_status ON return_requests(status, id)",
+      "CREATE INDEX IF NOT EXISTS idx_return_requests_order ON return_requests(sales_order_id)",
       "INSERT OR IGNORE INTO settings (k, v) VALUES ('wechat_qr_key', ''), ('alipay_qr_key', ''), ('payment_note', '')",
     ];
     for (const sql of upgradeSql) {
@@ -200,6 +220,50 @@ export interface ReturnOrder {
   status: string;
   created_at: string;
   items?: ReturnItem[];
+}
+
+// ---------- 客户退换货申请 ----------
+export interface ReturnRequestItem {
+  product_id: number;
+  qty: number;
+  price: number;
+  name?: string;
+  sku?: string;
+  unit?: string;
+}
+export interface ReturnRequest {
+  id: number;
+  request_no: string;
+  customer_id: number;
+  customer_name?: string;
+  customer_username?: string;
+  sales_order_id: number;
+  sales_order_no: string;
+  type: string;
+  reason: string;
+  items: ReturnRequestItem[];
+  total: number;
+  status: string;
+  return_order_id: number | null;
+  review_remark: string;
+  reviewer_id: number | null;
+  reviewer_name?: string;
+  reviewed_at: string | null;
+  created_at: string;
+}
+
+const REQUEST_TYPE_NAME: Record<string, string> = { return: "退货", exchange: "换货" };
+const REQUEST_STATUS_NAME: Record<string, string> = {
+  pending: "待审核",
+  approved: "已通过",
+  rejected: "已驳回",
+  cancelled: "已撤销",
+};
+export function requestTypeName(t: string): string {
+  return REQUEST_TYPE_NAME[t] || t;
+}
+export function requestStatusName(s: string): string {
+  return REQUEST_STATUS_NAME[s] || s;
 }
 export interface StockMovement {
   id: number;
@@ -534,6 +598,19 @@ export class Store {
       .bind(salesOrderId)
       .first<{ s: number }>();
     return round2(-(r?.s || 0));
+  }
+
+  /** 该销售单已通过退货单退回客户余额的金额（作废整单时要扣掉，避免重复退款） */
+  async returnsBalanceRefund(salesOrderId: number): Promise<number> {
+    const r = await this.db
+      .prepare(
+        `SELECT COALESCE(SUM(bl.change),0) AS s FROM balance_logs bl
+         JOIN return_orders ro ON ro.id=bl.ref_id
+         WHERE bl.ref_type='returns' AND ro.sales_order_id=? AND ro.status='done'`
+      )
+      .bind(salesOrderId)
+      .first<{ s: number }>();
+    return round2(r?.s || 0);
   }
 
   // ============ 密保问题 ============
@@ -1441,8 +1518,9 @@ export class Store {
           .bind(it.product_id, round2(it.qty), beforeQty, afterQty, id, operatorId, `作废销售单 ${o.order_no}`)
       );
     }
-    // 作废时把该单已从客户余额扣走的金额原路退回（含后续余额补收的部分）
-    const usedBalance = await this.salesBalanceNet(id);
+    // 作废时把该单已从客户余额扣走的金额原路退回（扣除退货单已退回的部分，避免重复退款）
+    const refundedByReturns = o.customer_id ? await this.returnsBalanceRefund(id) : 0;
+    const usedBalance = round2((await this.salesBalanceNet(id)) - refundedByReturns);
     if (usedBalance > 0 && o.customer_id) {
       const cu = await this.getUserById(o.customer_id);
       if (cu) {
@@ -1500,6 +1578,8 @@ export class Store {
       for (const si of linkedOrder.items || []) {
         soldQtyMap.set(si.product_id, round2((soldQtyMap.get(si.product_id) || 0) + si.qty));
       }
+      // 同一原单可能已经退过一部分，可退数量 = 售出 - 历史已退（仅统计有效退货单）
+      const returnedQtyMap = await this.returnedQtyByOrder(linkedOrder.id);
       const reqQtyMap = new Map<number, number>();
       for (const it of o.items) {
         reqQtyMap.set(it.product_id, round2((reqQtyMap.get(it.product_id) || 0) + it.qty));
@@ -1508,8 +1588,13 @@ export class Store {
         const soldQty = soldQtyMap.get(pid) || 0;
         const pName = prods.get(pid)?.name || `#${pid}`;
         if (soldQty === 0) throw new Error(`原销售单 ${linkedOrder.order_no} 中不包含商品「${pName}」`);
-        if (reqQty > soldQty) {
-          throw new Error(`商品「${pName}」退货数量（${reqQty}）超过原销售单售出数量（${soldQty}）`);
+        const remainQty = round2(soldQty - (returnedQtyMap.get(pid) || 0));
+        if (reqQty > remainQty) {
+          throw new Error(
+            remainQty <= 0
+              ? `商品「${pName}」在原销售单中已全部退完，无可退数量`
+              : `商品「${pName}」退货数量（${reqQty}）超过可退数量（${remainQty}，原单售出 ${soldQty}，已退 ${round2(soldQty - remainQty)}）`
+          );
         }
       }
     }
@@ -1557,6 +1642,23 @@ export class Store {
           .bind(it.product_id, round2(it.qty), beforeQty, afterQty, orderId, o.operator_id, `退货单 ${order_no}`)
       );
     }
+    // 原单为「余额支付」时，退货金额原路退回客户余额（与库存回补同批提交）
+    if (linkedOrder && linkedOrder.payment === "balance" && o.customer_id && total > 0) {
+      const cu = await this.getUserById(o.customer_id);
+      if (cu && cu.role === "customer") {
+        const before = round2(cu.balance || 0);
+        const after = round2(before + total);
+        stmts.push(this.db.prepare("UPDATE users SET balance=? WHERE id=?").bind(after, o.customer_id));
+        stmts.push(
+          this.db
+            .prepare(
+              `INSERT INTO balance_logs (user_id,change,before_balance,after_balance,type,ref_type,ref_id,ref_no,operator_id,remark)
+               VALUES (?,?,?,?, 'refund','returns',?,?,?,?)`
+            )
+            .bind(o.customer_id, total, before, after, orderId, order_no, o.operator_id, `退货单 ${order_no} 退款回余额`)
+        );
+      }
+    }
     await this.db.batch(stmts);
     return order_no;
   }
@@ -1596,6 +1698,33 @@ export class Store {
           )
           .bind(it.product_id, -round2(it.qty), beforeQty, afterQty, id, operatorId, `作废退货单 ${o.order_no}`)
       );
+    }
+    // 作废退货单：把该单已退回客户余额的金额扣回，避免「退了货又退钱」
+    const refundRow = await this.db
+      .prepare("SELECT COALESCE(SUM(change),0) AS s FROM balance_logs WHERE ref_type='returns' AND ref_id=?")
+      .bind(id)
+      .first<{ s: number }>();
+    const refunded = round2(refundRow?.s || 0);
+    if (refunded > 0 && o.customer_id) {
+      const cu = await this.getUserById(o.customer_id);
+      if (cu && cu.role === "customer") {
+        const before = round2(cu.balance || 0);
+        if (before < refunded) {
+          throw new Error(
+            `客户当前余额 ¥${before.toFixed(2)} 不足以扣回该退货单已退的 ¥${refunded.toFixed(2)}，请先充值或线下追回后再作废`
+          );
+        }
+        const after = round2(before - refunded);
+        stmts.push(this.db.prepare("UPDATE users SET balance=? WHERE id=?").bind(after, o.customer_id));
+        stmts.push(
+          this.db
+            .prepare(
+              `INSERT INTO balance_logs (user_id,change,before_balance,after_balance,type,ref_type,ref_id,ref_no,operator_id,remark)
+               VALUES (?,?,?,?, 'void','returns',?,?,?,?)`
+            )
+            .bind(o.customer_id, -refunded, before, after, id, o.order_no, operatorId, `作废退货单 ${o.order_no}，扣回已退余额`)
+        );
+      }
     }
     await this.db.batch(stmts);
   }
@@ -1647,7 +1776,211 @@ export class Store {
     return o;
   }
 
-  // ============ 库存流水 / 盘点 / 预警 ============
+  /** 某张销售单各商品的历史已退数量（只统计有效退货单） */
+  async returnedQtyByOrder(salesOrderId: number): Promise<Map<number, number>> {
+    const rows =
+      (
+        await this.db
+          .prepare(
+            `SELECT ri.product_id, SUM(ri.qty) AS qty FROM return_items ri
+             JOIN return_orders ro ON ro.id=ri.order_id
+             WHERE ro.sales_order_id=? AND ro.status='done' GROUP BY ri.product_id`
+          )
+          .bind(salesOrderId)
+          .all<{ product_id: number; qty: number }>()
+      ).results || [];
+    const m = new Map<number, number>();
+    for (const r of rows) m.set(r.product_id, round2(r.qty || 0));
+    return m;
+  }
+
+  // ============ 客户退换货申请（客户提交 → 管理员审核） ============
+  async createReturnRequest(o: {
+    customer_id: number;
+    sales_order_id: number;
+    type: string;
+    reason: string;
+    items: { product_id: number; qty: number }[];
+  }): Promise<string> {
+    const type = o.type === "exchange" ? "exchange" : "return";
+    if (!o.items.length) throw new Error("请至少选择一件需要退换的商品");
+    const reason = (o.reason || "").trim();
+    if (reason.length < 2) throw new Error("请填写退换货原因，便于商家快速处理");
+
+    const order = await this.getSalesOrder(o.sales_order_id);
+    if (!order) throw new Error("原销售单不存在");
+    if (order.customer_id !== o.customer_id) throw new Error("只能对自己名下的订单申请退换货");
+    if (order.status !== "done") throw new Error("该订单已作废，无法申请退换货");
+
+    const soldQty = new Map<number, number>();
+    const priceOf = new Map<number, number>();
+    const nameOf = new Map<number, { name: string; sku: string; unit: string }>();
+    for (const it of order.items || []) {
+      soldQty.set(it.product_id, round2((soldQty.get(it.product_id) || 0) + it.qty));
+      priceOf.set(it.product_id, it.price);
+      nameOf.set(it.product_id, { name: it.product_name || "", sku: it.sku || "", unit: it.unit || "" });
+    }
+    const returned = await this.returnedQtyByOrder(order.id);
+    // 待审核中的申请也要占用量，避免同一件商品被重复申请
+    const pending = await this.pendingQtyByOrder(order.id);
+
+    const reqQty = new Map<number, number>();
+    for (const it of o.items) {
+      if (it.qty <= 0) continue;
+      reqQty.set(it.product_id, round2((reqQty.get(it.product_id) || 0) + it.qty));
+    }
+    if (reqQty.size === 0) throw new Error("请至少填写一件商品的数量");
+
+    const snapshot: ReturnRequestItem[] = [];
+    let total = 0;
+    for (const [pid, q] of reqQty) {
+      const meta = nameOf.get(pid);
+      if (!meta) throw new Error("所选商品不在该销售单中");
+      const avail = round2((soldQty.get(pid) || 0) - (returned.get(pid) || 0) - (pending.get(pid) || 0));
+      if (q > avail) {
+        throw new Error(
+          `商品「${meta.name || "#" + pid}」可申请数量为 ${Math.max(0, avail)}，您填写了 ${q}${
+            (pending.get(pid) || 0) > 0 ? "（另有待审核申请占用）" : ""
+          }`
+        );
+      }
+      const price = round2(priceOf.get(pid) || 0);
+      snapshot.push({ product_id: pid, qty: q, price, name: meta.name, sku: meta.sku, unit: meta.unit });
+      total += round2(q * price);
+    }
+
+    const request_no = uid("RQ");
+    await this.db
+      .prepare(
+        `INSERT INTO return_requests (request_no,customer_id,sales_order_id,sales_order_no,type,reason,items_json,total)
+         VALUES (?,?,?,?,?,?,?,?)`
+      )
+      .bind(request_no, o.customer_id, order.id, order.order_no, type, reason, JSON.stringify(snapshot), round2(total))
+      .run();
+    return request_no;
+  }
+
+  /** 某张销售单当前「待审核」申请占用的数量 */
+  async pendingQtyByOrder(salesOrderId: number): Promise<Map<number, number>> {
+    const rows =
+      (await this.db.prepare("SELECT items_json FROM return_requests WHERE sales_order_id=? AND status='pending'").bind(salesOrderId).all<{ items_json: string }>()).results || [];
+    const m = new Map<number, number>();
+    for (const r of rows) {
+      let items: ReturnRequestItem[] = [];
+      try {
+        items = JSON.parse(r.items_json || "[]") as ReturnRequestItem[];
+      } catch {
+        items = [];
+      }
+      for (const it of items) m.set(it.product_id, round2((m.get(it.product_id) || 0) + (it.qty || 0)));
+    }
+    return m;
+  }
+
+  private parseRequest(r: ReturnRequest & { items_json?: string }): ReturnRequest {
+    let items: ReturnRequestItem[] = [];
+    try {
+      items = JSON.parse(r.items_json || "[]") as ReturnRequestItem[];
+    } catch {
+      items = [];
+    }
+    return { ...r, items };
+  }
+
+  async listReturnRequests(o: {
+    page: number;
+    pageSize: number;
+    customerId?: number;
+    status?: string;
+  }): Promise<{ rows: ReturnRequest[]; total: number }> {
+    const where: string[] = [];
+    const args: unknown[] = [];
+    if (o.customerId) {
+      where.push("rr.customer_id=?");
+      args.push(o.customerId);
+    }
+    if (o.status) {
+      where.push("rr.status=?");
+      args.push(o.status);
+    }
+    const w = where.length ? "WHERE " + where.join(" AND ") : "";
+    const total =
+      (await this.db.prepare(`SELECT COUNT(*) AS c FROM return_requests rr ${w}`).bind(...args).first<{ c: number }>())?.c ||
+      0;
+    const rows =
+      (
+        await this.db
+          .prepare(
+            `SELECT rr.*, cu.nickname AS customer_name, cu.username AS customer_username, rv.nickname AS reviewer_name
+             FROM return_requests rr LEFT JOIN users cu ON cu.id=rr.customer_id LEFT JOIN users rv ON rv.id=rr.reviewer_id
+             ${w} ORDER BY rr.id DESC LIMIT ? OFFSET ?`
+          )
+          .bind(...args, o.pageSize, (o.page - 1) * o.pageSize)
+          .all<ReturnRequest & { items_json?: string }>()
+      ).results || [];
+    return { rows: rows.map((r) => this.parseRequest(r)), total };
+  }
+
+  async getReturnRequest(id: number): Promise<ReturnRequest | null> {
+    const r = await this.db
+      .prepare(
+        `SELECT rr.*, cu.nickname AS customer_name, cu.username AS customer_username, rv.nickname AS reviewer_name
+         FROM return_requests rr LEFT JOIN users cu ON cu.id=rr.customer_id LEFT JOIN users rv ON rv.id=rr.reviewer_id
+         WHERE rr.id=?`
+      )
+      .bind(id)
+      .first<ReturnRequest & { items_json?: string }>();
+    return r ? this.parseRequest(r) : null;
+  }
+
+  /** 管理员审核：approve 通过（生成正式退货单并回补库存）/ reject 驳回 */
+  async reviewReturnRequest(
+    id: number,
+    action: "approve" | "reject",
+    reviewerId: number,
+    remark: string
+  ): Promise<{ status: string; returnOrderNo?: string }> {
+    const r = await this.getReturnRequest(id);
+    if (!r) throw new Error("退换货申请不存在");
+    if (r.status !== "pending") throw new Error("该申请已处理，无需重复审核");
+    const now = new Date().toISOString();
+    if (action === "reject") {
+      await this.db
+        .prepare("UPDATE return_requests SET status='rejected', reviewer_id=?, reviewed_at=?, review_remark=? WHERE id=?")
+        .bind(reviewerId, now, remark || "未通过审核", id)
+        .run();
+      return { status: "rejected" };
+    }
+    // 通过：生成正式退货单（库存回补 + 可退数量二次校验）
+    const orderNo = await this.createReturnOrder({
+      sales_order_id: r.sales_order_id,
+      customer_id: r.customer_id,
+      operator_id: reviewerId,
+      remark: `客户${requestTypeName(r.type)}申请 ${r.request_no}：${r.reason}`,
+      items: r.items.map((it) => ({ product_id: it.product_id, qty: it.qty, price: it.price })),
+    });
+    const created = await this.db
+      .prepare("SELECT id FROM return_orders WHERE order_no=?")
+      .bind(orderNo)
+      .first<{ id: number }>();
+    await this.db
+      .prepare(
+        "UPDATE return_requests SET status='approved', reviewer_id=?, reviewed_at=?, review_remark=?, return_order_id=? WHERE id=?"
+      )
+      .bind(reviewerId, now, remark || "", created?.id ?? null, id)
+      .run();
+    return { status: "approved", returnOrderNo: orderNo };
+  }
+
+  /** 客户撤销待审核的申请 */
+  async cancelReturnRequest(id: number, customerId: number): Promise<void> {
+    const r = await this.getReturnRequest(id);
+    if (!r) throw new Error("退换货申请不存在");
+    if (r.customer_id !== customerId) throw new Error("只能撤销自己提交的申请");
+    if (r.status !== "pending") throw new Error("该申请已处理，无法撤销");
+    await this.db.prepare("UPDATE return_requests SET status='cancelled' WHERE id=?").bind(id).run();
+  }
+
   async listMovements(o: {
     productId?: number;
     type?: string;

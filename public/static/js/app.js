@@ -338,6 +338,15 @@
       if (del) {
         del.addEventListener("click", function () {
           var cartId = row.getAttribute("data-cart-id");
+          // 自助下单允许把明细删到零行：清空后展示「继续添加商品」引导
+          if (box.getAttribute("data-allow-empty") === "1" && box.querySelectorAll(".item-row").length <= 1) {
+            if (cartId) cartRemove(Number(cartId));
+            row.remove();
+            toggleEmpty(true);
+            recalc();
+            toast("已清空商品明细，可点击「＋ 继续添加商品」重新选购");
+            return;
+          }
           if (box.querySelectorAll(".item-row").length > 1) {
             if (cartId) cartRemove(Number(cartId));
             row.remove();
@@ -363,6 +372,18 @@
       }
     }
 
+    /** 明细清空占位提示的显隐；空单时禁用提交按钮 */
+    function toggleEmpty(show) {
+      var hint = document.querySelector('[data-role="items-empty"]');
+      if (hint) hint.hidden = !show;
+      var bar = document.getElementById("orderSubmitBar");
+      if (!bar) return;
+      var empty = box.querySelectorAll(".item-row").length === 0;
+      bar.querySelectorAll("button").forEach(function (b) {
+        b.disabled = empty;
+      });
+    }
+
     box.querySelectorAll(".item-row").forEach(bindRow);
     addBtns.forEach(function (addBtn) {
       addBtn.addEventListener("click", function () {
@@ -379,10 +400,12 @@
         if (amtEl) amtEl.textContent = "¥0.00";
         box.appendChild(clone);
         bindRow(clone);
+        toggleEmpty(false);
         recalc();
       });
     });
     syncBalanceOption();
+    toggleEmpty(box.querySelectorAll(".item-row").length === 0);
     recalc();
   }
 

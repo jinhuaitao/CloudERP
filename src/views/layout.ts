@@ -29,6 +29,7 @@ const ADMIN_MENU: MenuItem[] = [
   { group: "进销业务", key: "purchase", icon: "📥", label: "采购进货", href: "/purchase" },
   { group: "进销业务", key: "sales", icon: "📤", label: "销售开单", href: "/sales" },
   { group: "进销业务", key: "returns", icon: "↩️", label: "销售退货", href: "/returns" },
+  { group: "进销业务", key: "return-requests", icon: "🔍", label: "退换货审核", href: "/returns/requests" },
   { group: "库存中心", key: "movements", icon: "🧾", label: "库存流水", href: "/movements" },
   { group: "库存中心", key: "warnings", icon: "⚠️", label: "库存预警", href: "/warnings", badgeKey: "lowStock" },
   { group: "库存中心", key: "adjust", icon: "🧮", label: "库存盘点", href: "/adjust" },
@@ -47,6 +48,7 @@ const SALES_MENU: MenuItem[] = [
   { group: "工作台", key: "sales-new", icon: "➕", label: "快速开单", href: "/sales/new" },
   { group: "业务管理", key: "sales", icon: "📤", label: "我的销售单", href: "/sales" },
   { group: "业务管理", key: "returns", icon: "↩️", label: "销售退货", href: "/returns" },
+  { group: "业务管理", key: "return-requests-sales", icon: "🔍", label: "退换货审核", href: "/returns/requests" },
   { group: "业务管理", key: "customers", icon: "👥", label: "客户管理", href: "/customers" },
   { group: "商品与库存", key: "products", icon: "📦", label: "商品库存", href: "/products" },
   { group: "商品与库存", key: "catalog", icon: "🛍️", label: "商品画册", href: "/catalog" },
@@ -61,6 +63,7 @@ const CUSTOMER_MENU: MenuItem[] = [
   { group: "在线订货", key: "catalog", icon: "🛍️", label: "商品目录", href: "/catalog" },
   { group: "在线订货", key: "shop", icon: "🛒", label: "自助下单", href: "/shop" },
   { group: "订单与账户", key: "sales", icon: "📋", label: "我的订单", href: "/sales" },
+  { group: "订单与账户", key: "my-returns", icon: "↩️", label: "退换货申请", href: "/returns/my" },
 ];
 
 function menuFor(role: string): MenuItem[] {

@@ -777,6 +777,53 @@ textarea { min-height: 84px; resize: vertical; }
 .items-hint a { font-weight: 600; }
 .items-hint .neg { color: var(--red); }
 
+/* ---------- 明细删空后的引导占位 ---------- */
+.items-empty {
+  text-align: center;
+  padding: 34px 16px;
+  margin-bottom: 14px;
+  border: 1px dashed var(--border-strong, var(--border));
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-size: 13.5px;
+}
+.items-empty[hidden] { display: none; }
+
+/* ---------- 退换货申请：数量输入 ---------- */
+.qty-input { width: 110px; }
+
+/* ---------- 单选卡片（退换货类型等） ---------- */
+.radio-cards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.radio-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 13px 15px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.radio-card:hover { border-color: var(--primary); }
+.radio-card.active {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  box-shadow: 0 0 0 1px var(--primary) inset;
+}
+.radio-card input { margin-top: 3px; accent-color: var(--primary); }
+.radio-card span { font-size: 13.5px; line-height: 1.5; }
+.radio-card strong { font-size: 14px; }
+@media (max-width: 768px) {
+  .radio-cards { grid-template-columns: 1fr; }
+}
+
 /* ---------- 客户收货信息完善进度 ---------- */
 .profile-progress .card-head { margin-bottom: 12px; }
 .progress {
@@ -921,6 +968,14 @@ canvas.chart { width: 100%; height: 100%; display: block; }
   .item-row input[data-role="item-price"] { grid-area: price; }
   .item-row .row-del { grid-area: del; }
   .item-row .amount { grid-area: amount; display: block; text-align: right; }
+  /* 窄屏：顶栏只保留页面标题，避免品牌名被压成竖排 */
+  .breadcrumb-app, .breadcrumb-sep { display: none; }
+  /* 窄屏：收起用户名与角色徽章，给页面标题留出空间 */
+  .user-name-text, .user-pill .badge { display: none; }
+  .topbar .page-title { font-size: 15px; line-height: 1.35; }
+  /* 窄屏：表格次要列隐藏，保证关键输入列可见 */
+  .col-hide-sm { display: none; }
+  .qty-input { width: 100%; max-width: 74px; }
 }
 @media (max-width: 560px) {
   .grid.cols-4, .grid.cols-2, .kv-grid, .grid.cols-5 { grid-template-columns: 1fr; }
