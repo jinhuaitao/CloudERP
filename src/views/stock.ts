@@ -497,7 +497,8 @@ export interface SalesFormData {
 }
 
 /** 客户自助下单可用的结算方式：
- *  微信 / 支付宝 / 银行转账只有商家在系统设置里配置过才展示，未配置直接不出现在下拉框。 */
+ *  微信 / 支付宝 / 银行转账只有商家在系统设置里配置过才展示，未配置直接不出现在下拉框。
+ *  现金与挂账/赊账已下线，历史单据仍按 paymentName 原样展示。 */
 export function customerPayMethods(ctx: ViewCtx): string[] {
   const s = ctx.settings || {};
   const has = (v?: string) => !!(v || "").trim();
@@ -505,7 +506,6 @@ export function customerPayMethods(ctx: ViewCtx): string[] {
   if (has(s.wechat_qr_key)) list.push("wechat");
   if (has(s.alipay_qr_key)) list.push("alipay");
   if (has(s.bank_account_name) || has(s.bank_name) || has(s.bank_account_no)) list.push("bank");
-  list.push("cash", "credit");
   return list;
 }
 
@@ -558,9 +558,10 @@ export function salesFormPage(ctx: ViewCtx, d: SalesFormData): string {
 
   // 结算方式：客户自助下单只列出「已配置」的渠道，并默认选中余额支付（余额为 0 时回退到首个可用渠道）
   const myBalance = round2(cp?.balance ?? ctx.user?.balance ?? 0);
-  const payMethods = isCustomer ? customerPayMethods(ctx) : ["wechat", "alipay", "cash", "bank", "balance", "credit"];
+  const payMethods = isCustomer ? customerPayMethods(ctx) : ["wechat", "alipay", "bank", "balance"];
   const fallbackPay = payMethods.find((k) => k !== "balance") || "balance";
   const defaultPay = isCustomer ? (myBalance > 0 ? "balance" : fallbackPay) : "wechat";
+  const onlyBalanceAndEmpty = isCustomer && payMethods.length === 1 && myBalance <= 0;
   const payOptions = payMethods
     .map((k) => {
       const label =
@@ -617,7 +618,13 @@ export function salesFormPage(ctx: ViewCtx, d: SalesFormData): string {
                   "",
                   true
                 )}
-                ${field("意向结算方式", `<select name="payment" id="paymentSelect">${payOptions}</select>`)}
+                ${field(
+                  "意向结算方式",
+                  `<select name="payment" id="paymentSelect">${payOptions}</select>`,
+                  onlyBalanceAndEmpty
+                    ? "商家暂未开放微信 / 支付宝 / 银行转账收款，您的账户余额也不足，本单无法提交，请联系客服充值或确认收款方式。"
+                    : ""
+                )}
               </div>
               <div class="items-hint" id="balanceHint" data-balance="${myBalance}" hidden></div>
               <div class="form-row">
@@ -722,7 +729,7 @@ export function salesDetailPage(
   const allReturned = !!ret && returnedOrders.length > 0 && totalAvail <= 0;
   const returnBtnNote = `<span class="muted small">↩️ 该单商品已全部退回</span>`;
   // 默认选中订单原结算方式，使下方收款码与下拉框初始状态一致
-  const payMethods = ["wechat", "alipay", "cash", "bank"];
+  const payMethods = ["wechat", "alipay", "bank"];
   // 仅关联了客户的订单才能用余额补收
   if (o.customer_id && customerBalance !== undefined) payMethods.push("balance");
   const payOptions = payMethods
