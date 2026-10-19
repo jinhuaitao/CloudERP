@@ -429,7 +429,8 @@ export function supplierFormPage(ctx: ViewCtx, s?: Supplier | null): string {
 export function catalogPage(
   ctx: ViewCtx,
   rows: Product[],
-  d: { gallery: GalleryImage[]; truncated: boolean }
+  d: { gallery: GalleryImage[]; truncated: boolean },
+  f: { q: string; categoryId: number | null; categories: Category[] } = { q: "", categoryId: null, categories: [] }
 ): string {
   const isCustomer = ctx.user?.role === "customer";
   const isAdmin = ctx.user?.role === "admin";
@@ -520,17 +521,29 @@ export function catalogPage(
       </div>`
     : "";
 
+  const toolbar = isAdmin
+    ? ""
+    : `<form class="toolbar" method="get" action="/catalog">
+        <input type="text" name="q" value="${esc(f.q)}" placeholder="🔍 搜索商品名称 / 编码 / 条码..." maxlength="64" class="grow">
+        <select name="category_id">${categoryOptions(f.categories, f.categoryId ?? "", "全部分类")}</select>
+        <button class="btn primary" type="submit">筛选</button>
+        ${f.q || f.categoryId ? `<a class="btn secondary" href="/catalog">重置</a>` : ""}
+      </form>`;
+
   return `
     ${pageHead(
-      "🛍️ 在线商品画册",
+      isAdmin ? "🛍️ 在线商品画册" : "🛍️ 商品目录",
       isAdmin
         ? `画册图库共 ${d.gallery.length} 张图片 · 商品卡片请在「商品档案」页查看`
-        : `共展示 ${rows.length} 款在售商品${isCustomer ? " · 选好数量点「加入购物车」，到「自助下单」统一结算" : ""}`,
+        : `共展示 ${rows.length} 款在售商品${
+            f.q || f.categoryId ? "（已按条件筛选）" : ""
+          }${isCustomer ? " · 选好数量点「加入购物车」，到「自助下单」统一结算" : ""}`,
       isCustomer
         ? `<a class="btn primary" href="/shop">🛒 购物车 / 去结算</a>`
         : `<a class="btn primary" href="/sales/new">＋ 代客开单</a>`
     )}
     ${galleryCard}
+    ${toolbar}
     ${cards ? `<div class="goods-grid">${cards}</div>` : ""}
     ${cartBar}`;
 }

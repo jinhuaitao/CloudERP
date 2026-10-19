@@ -13,6 +13,7 @@ import {
   type GalleryImage,
 } from "../views/products";
 import { store, pageCtx, needRoles, parseForm, redirectWith, saveUpload } from "./helpers";
+import type { Category } from "../db";
 import { getPagination, clientIP } from "../lib";
 
 function num(v: string | undefined): number {
@@ -495,9 +496,19 @@ export function registerProducts(app: Hono<AppEnv>) {
     try {
       const me = needRoles(c, ["admin", "sales", "customer"]);
       const s = store(c);
-      const [{ rows }, gallery] = await Promise.all([
-        s.listProducts({ status: "on", page: 1, pageSize: 500 }),
-        me.role === "admin" ? listGallery(c, s) : Promise.resolve({ images: [] as GalleryImage[], truncated: false }),
+      const q = (c.req.query("q") || "").trim();
+      const categoryId = parseInt((c.req.query("category_id") || c.req.query("categoryId") || "").trim(), 10) || null;
+      const isAdmin = me.role === "admin";
+      const [{ rows }, categories, gallery] = await Promise.all([
+        s.listProducts({
+          q: q || undefined,
+          categoryId: categoryId || undefined,
+          status: "on",
+          page: 1,
+          pageSize: 500,
+        }),
+        isAdmin ? Promise.resolve([] as Category[]) : s.listCategories(),
+        isAdmin ? listGallery(c, s) : Promise.resolve({ images: [] as GalleryImage[], truncated: false }),
       ]);
       const ctx = pageCtx(c);
       return c.html(
@@ -505,7 +516,12 @@ export function registerProducts(app: Hono<AppEnv>) {
           title: "选购商品",
           ctx,
           active: "catalog",
-          content: catalogPage(ctx, rows, { gallery: gallery.images, truncated: gallery.truncated }),
+          content: catalogPage(
+            ctx,
+            rows,
+            { gallery: gallery.images, truncated: gallery.truncated },
+            { q, categoryId, categories }
+          ),
         })
       );
     } catch (e) {
