@@ -19,6 +19,8 @@ import {
 } from "../views/stock";
 import { store, pageCtx, needRoles, parseForm, redirectWith } from "./helpers";
 import { getPagination, clientIP, utc8Range } from "../lib";
+import { readCart, clearCartCookieHeader } from "../cart";
+import type { Product } from "../db";
 
 /** 从平行数组组装单据明细（过滤空行） */
 function parseItems(all: (name: string) => string[]): { product_id: number; qty: number; price: number }[] {
@@ -546,6 +548,24 @@ export function registerStock(app: Hono<AppEnv>) {
         s.listProducts({ status: "on", page: 1, pageSize: 200 }),
         s.getUserById(me.id),
       ]);
+
+      // 把「商品目录」购物车渲染成订单明细：以数据库实时售价与库存为准
+      const byId = new Map<number, Product>();
+      for (const p of rows) byId.set(p.id, p);
+      const lines: { product: Product; qty: number }[] = [];
+      let removed = 0;
+      let adjusted = 0;
+      for (const line of readCart(c)) {
+        const p = byId.get(line.id);
+        if (!p || p.status !== "on" || p.stock <= 0) {
+          removed++;
+          continue;
+        }
+        const q = Math.min(line.qty, p.stock);
+        if (q < line.qty) adjusted++;
+        lines.push({ product: p, qty: q });
+      }
+
       const ctx = pageCtx(c);
       return c.html(
         layout({
@@ -559,6 +579,7 @@ export function registerStock(app: Hono<AppEnv>) {
             action: "/shop",
             forCustomer: true,
             customerProfile: customerRecord,
+            cart: { lines, removed, adjusted },
           }),
         })
       );
@@ -582,6 +603,20 @@ export function registerStock(app: Hono<AppEnv>) {
       if (!shipping_phone || !shipping_address) {
         return redirectWith(c, "/shop", undefined, "请填写收货联系电话与详细收货地址以便商家发货");
       }
+      if (items.length === 0) {
+        return redirectWith(c, "/shop", undefined, "请至少选择一款商品并填写数量");
+      }
+      // 客户自助下单只认系统售价：忽略前端提交的 price，避免被改价
+      const uniqIds = [...new Set(items.map((it) => it.product_id))];
+      const found = await Promise.all(uniqIds.map((id) => s.getProduct(id)));
+      const onSale = new Map<number, Product>();
+      for (const p of found) if (p && p.status === "on") onSale.set(p.id, p);
+      const pricedItems: { product_id: number; qty: number; price: number }[] = [];
+      for (const it of items) {
+        const p = onSale.get(it.product_id);
+        if (!p) return redirectWith(c, "/shop", undefined, "部分商品已下架，请返回商品目录重新选择");
+        pricedItems.push({ product_id: it.product_id, qty: it.qty, price: p.sale_price });
+      }
       const payment = (fields.payment || "").trim() || "wechat";
       const order_no = await s.createSalesOrder({
         customer_id: me.id,
@@ -594,10 +629,13 @@ export function registerStock(app: Hono<AppEnv>) {
         shipping_phone,
         shipping_address,
         remark: (fields.remark || "").trim(),
-        items,
+        items: pricedItems,
       });
       await s.audit(me.id, "客户下单", "销售单", `客户自助下单 ${order_no}`, clientIP(c));
-      return redirectWith(c, "/sales", `订单 ${order_no} 提交成功，已同步更新您的默认收货信息`);
+      // 下单成功即清空购物车，避免重复下单
+      const res = redirectWith(c, "/sales", `订单 ${order_no} 提交成功，已同步更新您的默认收货信息`);
+      res.headers.append("Set-Cookie", clearCartCookieHeader());
+      return res;
     } catch (e) {
       if (e instanceof HTTPException) throw e;
       return redirectWith(c, "/shop", undefined, "下单失败：" + (e as Error).message);

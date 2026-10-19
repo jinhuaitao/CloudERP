@@ -271,19 +271,53 @@ export function profilePage(
 ): string {
   const u = d.user;
   const isCustomer = u.role === "customer";
-  const missingShipping = !u.phone || !u.address;
   const otherSessionsCount = d.sessions.filter((s) => s.id !== d.currentDigest).length;
 
-  const onboardingBanner =
-    isCustomer && (d.onboarding || missingShipping)
-      ? `<div class="card highlight-card" style="background:var(--primary-soft);border-color:var(--primary)">
-          <div class="card-head" style="margin-bottom:4px">
-            <h3>👋 欢迎使用 ${esc(ctx.appName)}！请确认或完善您的收货信息</h3>
-            ${!missingShipping ? `<a class="btn small primary" href="/catalog">🛍️ 前往选购商品 →</a>` : ""}
-          </div>
-          <p class="muted small" style="margin:0">完善下方的<strong>收货人姓名、联系电话与详细收货地址</strong>后，您在自助下单时系统将自动为您带出配送信息，无需重复输入。</p>
-        </div>`
-      : "";
+  const steps = [
+    { ok: !!u.shipping_name, label: "收货人姓名" },
+    { ok: !!u.phone, label: "联系电话" },
+    { ok: !!u.address, label: "详细地址" },
+  ];
+  const doneCount = steps.filter((s) => s.ok).length;
+  const pct = Math.round((doneCount / steps.length) * 100);
+  const complete = doneCount === steps.length;
+
+  // 客户完善引导：注册后 / 缺信息时置顶展示完善进度，已完善则转为选购入口
+  const customerBanner = isCustomer
+    ? `<div class="card highlight-card profile-progress${complete ? " is-done" : ""}">
+        <div class="card-head">
+          <h3>${
+            complete
+              ? "✅ 收货信息已完善，随时可以下单"
+              : `👋 ${d.onboarding ? `欢迎使用 ${esc(ctx.appName)}，` : ""}请完善收货信息（${doneCount}/${steps.length}）`
+          }</h3>
+          ${
+            complete
+              ? `<div class="btn-row no-print">
+                   <a class="btn small primary" href="/catalog">🛍️ 去商品目录选购</a>
+                   <a class="btn small secondary" href="/shop">🛒 自助下单</a>
+                 </div>`
+              : badge("待完善", "yellow")
+          }
+        </div>
+        <div class="progress" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"><i style="width:${pct}%"></i></div>
+        <div class="step-list">
+          ${steps
+            .map(
+              (s) =>
+                `<span class="step-item ${s.ok ? "ok" : "todo"}"><span class="dot">${s.ok ? "✓" : "•"}</span>${esc(
+                  s.label
+                )}</span>`
+            )
+            .join("")}
+        </div>
+        <p class="muted small" style="margin:10px 0 0">${
+          complete
+            ? "下单时系统会自动带出收货人、电话与地址，无需重复填写；在商品目录点「加入购物车」即可批量选购。"
+            : "完善后，下单时系统将自动带出配送信息，商家也能更快安排发货。"
+        }</p>
+      </div>`
+    : "";
 
   const shippingCard = `
     <div class="card highlight-card" id="shipping">
@@ -295,7 +329,7 @@ export function profilePage(
             : badge("待完善收货地址", "yellow")
         }
       </div>
-      <p class="muted small mb">用于订单发货与物流配送，保存后在「自助下单」与商家代客开单时将自动填充。</p>
+      <p class="muted small mb">用于订单发货与物流配送，保存后在「自助下单」与商家代客开单时将自动填充，也是加入购物车后快速结算的前提。</p>
       <form method="post" action="/profile/shipping">
         ${csrfInput(ctx.csrf)}
         <div class="form-row">
@@ -319,10 +353,11 @@ export function profilePage(
           true
         )}
         <div class="btn-row">
-          <button class="btn primary" type="submit">💾 保存收货信息</button>
+          <button class="btn secondary" type="submit">💾 保存收货信息</button>
           ${
             isCustomer
-              ? `<button class="btn success" type="submit" name="next" value="shop">🛒 保存并前往下单 →</button>`
+              ? `<button class="btn primary" type="submit" name="next" value="catalog">🛍️ 保存并去商品目录 →</button>
+                 <button class="btn success" type="submit" name="next" value="shop">🛒 保存并前往下单 →</button>`
               : ""
           }
         </div>
@@ -356,7 +391,7 @@ export function profilePage(
       `当前登录：@${u.username}（${roleName(u.role)}）`,
       isCustomer ? `<a class="btn primary" href="/shop">🛒 我要下单</a>` : ""
     )}
-    ${onboardingBanner}
+    ${customerBanner}
     ${shippingCard}
     <div class="grid cols-2">
       <div class="card"><h3>📝 账号基础资料</h3>

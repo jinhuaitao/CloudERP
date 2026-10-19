@@ -98,30 +98,58 @@ function productOptions(
 function itemRow(
   products: Product[],
   priceKey: "purchase_price" | "sale_price",
-  preselectPid?: number
+  preselectPid?: number,
+  initQty = 1,
+  cartId?: number,
+  lockPrice = false
 ): string {
   const preProd = preselectPid ? products.find((x) => x.id === preselectPid) : undefined;
   const initPrice = preProd ? String(preProd[priceKey]) : "";
-  const initAmt = preProd ? money(preProd[priceKey]) : "¥0.00";
-  return `<div class="item-row">
+  const initAmt = preProd ? money(round2(preProd[priceKey] * initQty)) : "¥0.00";
+  return `<div class="item-row"${cartId ? ` data-cart-id="${cartId}"` : ""}>
     <select name="product_id" data-role="item-product" required><option value="">— 请选择商品（支持名称/SKU检索） —</option>${productOptions(products, priceKey, preselectPid)}</select>
-    <input type="number" name="qty" data-role="item-qty" min="0.01" step="0.01" value="1" placeholder="数量" required>
-    <input type="number" name="price" data-role="item-price" min="0" step="0.01" value="${initPrice}" placeholder="单价(元)" required>
+    <input type="number" name="qty" data-role="item-qty" min="0.01" step="0.01" value="${initQty}" placeholder="数量" required>
+    <input type="number" name="price" data-role="item-price" min="0" step="0.01" value="${initPrice}" placeholder="单价(元)" required${
+      lockPrice ? ' readonly title="客户自助下单按系统标准售价结算，不可改价"' : ""
+    }>
     <span class="amount" data-role="item-amount">${initAmt}</span>
     <button type="button" class="row-del" data-action="remove-row" title="删除该明细行">✕</button>
   </div>`;
 }
 
+export interface OrderItemsOptions {
+  preselectPid?: number;
+  /** 购物车带入的明细（客户自助下单） */
+  cartLines?: { product: Product; qty: number }[];
+  /** 是否保留「＋ 添加商品行」按钮（自助下单场景关闭） */
+  allowAddRow?: boolean;
+  /** 底部「＋ 继续添加商品」改为跳转链接（自助下单 → 商品目录） */
+  addRowHref?: string;
+  /** 明细区头部提示（允许传 HTML） */
+  headHint?: string;
+  /** 锁定单价（客户自助下单按系统售价结算） */
+  lockPrice?: boolean;
+}
+
 function orderItemsBlock(
   products: Product[],
   priceKey: "purchase_price" | "sale_price",
-  preselectPid?: number
+  opts: OrderItemsOptions = {}
 ): string {
+  const allowAddRow = opts.allowAddRow !== false;
+  const rows =
+    opts.cartLines && opts.cartLines.length > 0
+      ? opts.cartLines
+          .map((l) => itemRow(products, priceKey, l.product.id, l.qty, l.product.id, opts.lockPrice))
+          .join("")
+      : itemRow(products, priceKey, opts.preselectPid, 1, undefined, opts.lockPrice);
+
   return `<div class="card">
     <div class="card-head">
       <h3>🧾 单据商品明细</h3>
-      <button type="button" class="btn small secondary" data-action="add-row">＋ 添加商品行</button>
+      ${allowAddRow ? `<button type="button" class="btn small secondary" data-action="add-row">＋ 添加商品行</button>` : ""}
     </div>
+    ${opts.headHint ? `<div class="items-hint">${opts.headHint}</div>` : ""}
     <div class="item-row item-row-head">
       <span>商品名称 / 编码 / 当前库存</span>
       <span>数量</span>
@@ -129,9 +157,13 @@ function orderItemsBlock(
       <span class="num">行小计</span>
       <span></span>
     </div>
-    <div id="orderItems">${itemRow(products, priceKey, preselectPid)}</div>
+    <div id="orderItems">${rows}</div>
     <div class="order-summary-bar">
-      <button type="button" class="btn secondary" data-action="add-row">＋ 继续添加商品</button>
+      ${
+        opts.addRowHref
+          ? `<a class="btn secondary" href="${esc(opts.addRowHref)}">＋ 继续添加商品</a>`
+          : `<button type="button" class="btn secondary" data-action="add-row">＋ 继续添加商品</button>`
+      }
       <div class="order-total" id="orderTotal">合计：<span>¥0.00</span></div>
     </div>
   </div>`;
@@ -209,7 +241,7 @@ export function purchaseFormPage(
           ${field("采购备注", `<input type="text" name="remark" maxlength="200" placeholder="选填，如：发票号、物流单号">`)}
         </div>
       </div>
-      ${orderItemsBlock(d.products, "purchase_price", d.preselectPid)}
+      ${orderItemsBlock(d.products, "purchase_price", { preselectPid: d.preselectPid })}
       <div class="btn-row">
         <button class="btn primary" type="submit">✅ 确认审核并入库</button>
         <a class="btn secondary" href="/purchase">取消</a>
@@ -353,12 +385,22 @@ export interface SalesFormData {
   forCustomer: boolean;
   defaultSalesId?: number | null;
   customerProfile?: User | null;
+  /** 客户自助下单：由「商品目录」购物车带入的明细 */
+  cart?: {
+    lines: { product: Product; qty: number }[];
+    /** 因下架 / 缺货被移除的款数 */
+    removed: number;
+    /** 因可用库存不足被下调数量的款数 */
+    adjusted: number;
+  };
 }
 
 export function salesFormPage(ctx: ViewCtx, d: SalesFormData): string {
   const sellable = d.products.filter((p) => p.status === "on");
   const isCustomer = d.forCustomer;
   const cp = d.customerProfile || null;
+  const cartLines = d.cart?.lines || [];
+  const cartCount = cartLines.length;
 
   const customerField = isCustomer
     ? ""
@@ -402,12 +444,20 @@ export function salesFormPage(ctx: ViewCtx, d: SalesFormData): string {
     .map((k) => `<option value="${k}">${esc(paymentName(k))}</option>`)
     .join("");
 
+  const cartHint = cartCount
+    ? `🛒 已从 <a href="/catalog">商品目录</a> 的购物车带入 <strong>${cartCount}</strong> 款商品，请核对数量与单价后提交。${
+        d.cart && d.cart.removed > 0 ? `<span class="neg">其中 ${d.cart.removed} 款商品已下架或缺货，已自动移除。</span>` : ""
+      }${d.cart && d.cart.adjusted > 0 ? `<span class="neg">${d.cart.adjusted} 款商品数量超出可用库存，已按库存上限调整。</span>` : ""}`
+    : d.cart && d.cart.removed > 0
+      ? `购物车中 ${d.cart.removed} 款商品已下架或缺货，已自动移除；可返回 <a href="/catalog">商品目录</a> 重新选购。`
+      : `购物车暂为空，可先前往 <a href="/catalog">商品目录</a> 挑选商品并加入购物车，或直接在下方选择商品开单。`;
+
   return `
     ${pageHead(
       isCustomer ? "🛒 在线自助订货" : "＋ 新建销售开单",
-      isCustomer ? "已自动带出您的默认收货信息，支持微信/支付宝扫码付款" : "支持客户默认收货地址带出、微信/支付宝收款码展示、折扣核算与二级分销计提",
+      isCustomer ? "核对购物车带入的商品与数量，确认收货信息后即可提交订单" : "支持客户默认收货地址带出、微信/支付宝收款码展示、折扣核算与二级分销计提",
       isCustomer
-        ? `<a class="btn secondary" href="/profile">📍 修改默认收货地址</a> <a class="btn secondary" href="/sales">← 我的订单</a>`
+        ? `<a class="btn secondary" href="/profile">📍 修改默认收货地址</a> <a class="btn secondary" href="/catalog">🛍️ 继续选购</a> <a class="btn secondary" href="/sales">← 我的订单</a>`
         : `<a class="btn secondary" href="/sales">← 返回订单列表</a>`
     )}
     <form method="post" action="${esc(d.action)}">
@@ -474,7 +524,17 @@ export function salesFormPage(ctx: ViewCtx, d: SalesFormData): string {
               ${paymentQrWidget(ctx, "wechat")}
             </div>`
       }
-      ${orderItemsBlock(sellable, "sale_price")}
+      ${
+        isCustomer
+          ? orderItemsBlock(sellable, "sale_price", {
+              cartLines,
+              allowAddRow: false,
+              addRowHref: "/catalog",
+              headHint: cartHint,
+              lockPrice: true,
+            })
+          : orderItemsBlock(sellable, "sale_price")
+      }
       <div class="btn-row">
         <button class="btn primary" type="submit">${isCustomer ? "🛒 确认提交订单" : "✅ 确认开单并出库"}</button>
         <a class="btn secondary" href="/sales">取消</a>

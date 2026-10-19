@@ -203,9 +203,25 @@
       var del = row.querySelector('[data-action="remove-row"]');
       if (del) {
         del.addEventListener("click", function () {
+          var cartId = row.getAttribute("data-cart-id");
           if (box.querySelectorAll(".item-row").length > 1) {
+            if (cartId) cartRemove(Number(cartId));
             row.remove();
             recalc();
+          } else if (cartId) {
+            // 最后一行来自购物车：删除即移出购物车并还原为空行，不阻断操作
+            cartRemove(Number(cartId));
+            row.removeAttribute("data-cart-id");
+            var selEl = row.querySelector("[data-role=item-product]");
+            var qtyEl = row.querySelector("[data-role=item-qty]");
+            var priceEl = row.querySelector("[data-role=item-price]");
+            var amtBox = row.querySelector("[data-role=item-amount]");
+            if (selEl) selEl.selectedIndex = 0;
+            if (qtyEl) qtyEl.value = "1";
+            if (priceEl) priceEl.value = "";
+            if (amtBox) amtBox.textContent = "¥0.00";
+            recalc();
+            toast("已从购物车移除该商品");
           } else {
             window.alert("一张单据至少需要保留一行商品明细");
           }
@@ -399,6 +415,153 @@
     update();
   }
 
+  // ---------- 11. 订货购物车（商品目录加入 → 自助下单自动带入） ----------
+  var CART_COOKIE = "jc_cart";
+  var CART_MAX_LINES = 30;
+
+  function cartRead() {
+    var m = document.cookie.match(/(?:^|;\s*)jc_cart=([^;]*)/);
+    if (!m) return [];
+    try {
+      var arr = JSON.parse(decodeURIComponent(m[1]));
+      if (!Array.isArray(arr)) return [];
+      var out = [];
+      arr.forEach(function (it) {
+        var id = Array.isArray(it) ? Number(it[0]) : Number(it && it.i);
+        var q = Array.isArray(it) ? Number(it[1]) : Number(it && it.q);
+        var p = Array.isArray(it) ? Number(it[2]) : Number(it && it.p);
+        if (id > 0 && q > 0) out.push({ i: id, q: q, p: p > 0 ? p : 0 });
+      });
+      return out.slice(0, CART_MAX_LINES);
+    } catch (e) {
+      return [];
+    }
+  }
+
+  function cartWrite(items) {
+    if (!items || !items.length) {
+      document.cookie = CART_COOKIE + "=; path=/; max-age=0; samesite=lax";
+      return;
+    }
+    var compact = items.slice(0, CART_MAX_LINES).map(function (it) {
+      return [it.i, Math.round(it.q * 100) / 100, Math.round((it.p || 0) * 100) / 100];
+    });
+    document.cookie =
+      CART_COOKIE +
+      "=" +
+      encodeURIComponent(JSON.stringify(compact)) +
+      "; path=/; max-age=" +
+      60 * 60 * 24 * 30 +
+      "; samesite=lax";
+  }
+
+  function cartRemove(id) {
+    cartWrite(
+      cartRead().filter(function (it) {
+        return it.i !== id;
+      })
+    );
+  }
+
+  function toast(msg, isErr) {
+    var el = document.getElementById("jxToast");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "jxToast";
+      el.className = "jx-toast";
+      document.body.appendChild(el);
+    }
+    el.textContent = msg;
+    el.className = "jx-toast show" + (isErr ? " err" : "");
+    if (el.__timer) clearTimeout(el.__timer);
+    el.__timer = setTimeout(function () {
+      el.className = "jx-toast";
+    }, 2200);
+  }
+
+  function catalogCart() {
+    var grid = document.querySelector(".goods-grid");
+    var bar = document.getElementById("cartBar");
+    if (!grid || !bar) return;
+
+    function render() {
+      var items = cartRead();
+      var total = 0;
+      items.forEach(function (it) {
+        total += it.q * it.p;
+      });
+      var countEl = document.getElementById("cartBarCount");
+      var totalEl = document.getElementById("cartBarTotal");
+      if (countEl) countEl.textContent = String(items.length);
+      if (totalEl) totalEl.textContent = "¥" + total.toFixed(2);
+      bar.hidden = items.length === 0;
+      grid.querySelectorAll(".goods-card").forEach(function (card) {
+        var pid = Number(card.getAttribute("data-pid"));
+        var found = null;
+        items.forEach(function (it) {
+          if (it.i === pid) found = it;
+        });
+        var chip = card.querySelector("[data-incart]");
+        card.classList.toggle("in-cart", !!found);
+        if (chip) {
+          chip.hidden = !found;
+          chip.textContent = found
+            ? "已在购物车：" + found.q + " " + (card.getAttribute("data-unit") || "")
+            : "";
+        }
+      });
+    }
+
+    grid.addEventListener("click", function (e) {
+      if (!e.target || !e.target.closest) return;
+      var btn = e.target.closest("[data-add-cart]");
+      if (!btn || btn.disabled) return;
+      var card = btn.closest(".goods-card");
+      if (!card) return;
+      var id = Number(card.getAttribute("data-pid"));
+      var price = parseFloat(card.getAttribute("data-price")) || 0;
+      var stock = parseFloat(card.getAttribute("data-stock")) || 0;
+      var name = card.getAttribute("data-name") || "商品";
+      var qtyInput = card.querySelector("[data-cart-qty]");
+      var addQty = qtyInput ? parseFloat(qtyInput.value) || 0 : 1;
+      if (addQty <= 0) {
+        toast("请先填写购买数量", true);
+        return;
+      }
+      if (stock <= 0) {
+        toast("「" + name + "」暂时缺货", true);
+        return;
+      }
+      var items = cartRead();
+      var target = null;
+      items.forEach(function (it) {
+        if (it.i === id) target = it;
+      });
+      if (target) {
+        target.q = Math.min(stock, Math.round((target.q + addQty) * 100) / 100);
+        target.p = price;
+      } else {
+        items.push({ i: id, q: Math.min(stock, addQty), p: price });
+      }
+      cartWrite(items);
+      render();
+      toast("已加入购物车：" + name);
+      if (qtyInput) qtyInput.value = "1";
+    });
+
+    var clearBtn = bar.querySelector('[data-action="cart-clear"]');
+    if (clearBtn) {
+      clearBtn.addEventListener("click", function () {
+        if (!window.confirm("确定清空购物车吗？")) return;
+        cartWrite([]);
+        render();
+        toast("购物车已清空");
+      });
+    }
+
+    render();
+  }
+
   document.addEventListener("DOMContentLoaded", function () {
     initTheme();
     flash();
@@ -411,6 +574,7 @@
     trendChart();
     roleSections();
     adjustStockHint();
+    catalogCart();
   });
   window.addEventListener("resize", function () {
     trendChart();

@@ -346,7 +346,15 @@ export function catalogPage(
               : p.stock <= p.min_stock
                 ? badge("库存紧张", "yellow")
                 : badge("现货充足", "green");
-            return `<div class="goods-card${soldout ? " soldout" : ""}">
+            // 客户可直接加入购物车；商家侧仅浏览
+            const buyBar = isCustomer
+              ? `<div class="goods-buy">
+                  <input type="number" class="qty-input" data-cart-qty value="1" min="0.01" max="${p.stock > 0 ? p.stock : 1}" step="1" aria-label="购买数量">
+                  <button type="button" class="btn small primary" data-add-cart="${p.id}"${soldout ? " disabled" : ""}>${soldout ? "暂时缺货" : "🛒 加入购物车"}</button>
+                </div>
+                <div class="goods-incart" data-incart hidden></div>`
+              : "";
+            return `<div class="goods-card${soldout ? " soldout" : ""}" data-pid="${p.id}" data-name="${esc(p.name)}" data-price="${p.sale_price}" data-stock="${p.stock}" data-unit="${esc(p.unit)}">
               <div class="goods-img-wrap">
                 <img src="${p.image_key ? fileUrl(p.image_key) : PLACEHOLDER}" alt="${esc(p.name)}" loading="lazy">
                 <div class="goods-badge-pos">${stockBadge}</div>
@@ -359,18 +367,32 @@ export function catalogPage(
                   <div class="small muted">余 ${qty(p.stock)} ${esc(p.unit)}</div>
                 </div>
                 <div class="small muted mt-xs">编码：${esc(p.sku || "—")}</div>
+                ${buyBar}
               </div>
             </div>`;
           })
           .join("")
       : `<div class="card"><div class="empty-state"><span class="empty-ico">📭</span><span>暂无符合条件的上架商品</span></div></div>`;
 
+  const cartBar = isCustomer
+    ? `<div class="cart-bar" id="cartBar" hidden>
+        <div class="cart-bar-main">
+          <span class="cart-bar-count">🛒 购物车已选 <strong id="cartBarCount">0</strong> 款商品</span>
+          <span class="cart-bar-total">预估合计 <strong id="cartBarTotal">¥0.00</strong></span>
+        </div>
+        <div class="cart-bar-actions">
+          <button type="button" class="btn small secondary" data-action="cart-clear">清空</button>
+          <a class="btn small primary" href="/shop">去结算 →</a>
+        </div>
+      </div>`
+    : "";
+
   return `
     ${pageHead(
       "🛍️ 在线商品画册",
-      `共展示 ${rows.length} 款在售商品`,
+      `共展示 ${rows.length} 款在售商品${isCustomer ? " · 选好数量点「加入购物车」，到「自助下单」统一结算" : ""}`,
       isCustomer
-        ? `<a class="btn primary" href="/shop">🛒 前往自助下单</a>`
+        ? `<a class="btn primary" href="/shop">🛒 购物车 / 去结算</a>`
         : `<a class="btn primary" href="/sales/new">＋ 代客开单</a>`
     )}
     <form class="toolbar" method="get" action="/catalog">
@@ -379,5 +401,6 @@ export function catalogPage(
       <button class="btn primary" type="submit">查找</button>
       ${f?.q || f?.categoryId ? `<a class="btn secondary" href="/catalog">重置</a>` : ""}
     </form>
-    <div class="goods-grid">${cards}</div>`;
+    <div class="goods-grid">${cards}</div>
+    ${cartBar}`;
 }

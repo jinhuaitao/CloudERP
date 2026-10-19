@@ -26,6 +26,7 @@ import {
   sidFromCookie,
   isHttps,
 } from "./helpers";
+import { clearCartCookieHeader } from "../cart";
 
 function homeFor(role: SafeUser["role"]): string {
   return role === "customer" ? "/catalog" : "/dashboard";
@@ -183,6 +184,8 @@ export function registerSetupAuth(app: Hono<AppEnv>) {
     }
     const res = c.redirect("/login", 302);
     res.headers.append("Set-Cookie", "sid=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0");
+    // 退出登录同时清空订货购物车，避免同一浏览器换账号后残留他人商品
+    res.headers.append("Set-Cookie", clearCartCookieHeader());
     return res;
   });
 
