@@ -812,7 +812,9 @@ textarea { min-height: 84px; resize: vertical; }
   transition: border-color 0.15s, background 0.15s;
 }
 .radio-card:hover { border-color: var(--primary); }
-.radio-card.active {
+/* 选中态：服务端回填 .active，纯前端点选时用 :has() 即时高亮（无需 JS） */
+.radio-card.active,
+.radio-card:has(input:checked) {
   border-color: var(--primary);
   background: var(--primary-soft);
   box-shadow: 0 0 0 1px var(--primary) inset;

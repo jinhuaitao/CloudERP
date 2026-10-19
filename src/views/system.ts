@@ -11,7 +11,7 @@ import {
   roleName,
   type ViewCtx,
 } from "./layout";
-import type { User, BalanceLog } from "../db";
+import type { User, BalanceLog, ClearScope } from "../db";
 import { balanceTypeName } from "../db";
 import { fileUrl } from "./products";
 
@@ -638,7 +638,16 @@ export interface BackupInfo {
   uploaded: string;
 }
 
-export function maintenancePage(ctx: ViewCtx, d: { backups: BackupInfo[]; keep: string }): string {
+export function maintenancePage(
+  ctx: ViewCtx,
+  d: {
+    backups: BackupInfo[];
+    keep: string;
+    counts: Record<string, number>;
+    plan: { table: string; label: string; scope: ClearScope }[];
+    keyword: string;
+  }
+): string {
   const rows =
     d.backups.length > 0
       ? d.backups
@@ -661,6 +670,67 @@ export function maintenancePage(ctx: ViewCtx, d: { backups: BackupInfo[]; keep: 
           .join("")
       : `<div class="empty-state"><span class="empty-ico">🗄️</span><span>R2 存储桶中暂无备份快照，点击上方按钮立即创建</span></div>`;
 
+  // ---------- 清空数据卡 ----------
+  const cnt = (k: string) => d.counts[k] || 0;
+  const biz = d.plan.filter((p) => p.scope === "business");
+  const fac = d.plan;
+  const sum = (items: { table: string }[]) => items.reduce((n, p) => n + cnt(p.table), 0);
+  const bizRows = sum(biz);
+  const facRows = sum(fac) + cnt("users") + cnt("sessions");
+
+  const radio = (value: ClearScope, title: string, desc: string, meta: string) => `
+    <label class="radio-card">
+      <input type="radio" name="scope" value="${value}"${value === "business" ? " checked" : ""}>
+      <span><strong>${title}</strong><br><span class="muted small">${desc}</span><br><span class="muted small">${meta}</span></span>
+    </label>`;
+
+  const countRow = (label: string, key: string, both: boolean) => `<tr>
+      <td>${esc(label)}</td>
+      <td class="num">${cnt(key).toLocaleString("zh-CN")}</td>
+      <td>${both ? badge("两档均清", "yellow") : badge("仅恢复出厂", "red")}</td>
+    </tr>`;
+
+  const countRows =
+    d.plan.map((p) => countRow(p.label, p.table, p.scope === "business")).join("") +
+    countRow("账号（除当前登录管理员）", "users", false) +
+    countRow("在线会话（除当前会话）", "sessions", false);
+
+  const clearCard = `
+    <div class="card">
+      <div class="card-head"><h3>🗑️ 清空数据</h3></div>
+      <p class="muted small mb">清空前系统会自动创建一份全量快照存入 R2，快照写入失败时不会执行任何删除。R2 中的商品图片、头像与收款码文件一律保留，不随数据清空删除。</p>
+      <form method="post" action="/maintenance/clear" data-confirm="⚠️ 高危操作：清空后除自动快照外无法撤销，确定按所选范围清空吗？">
+        ${csrfInput(ctx.csrf)}
+        <div class="radio-cards">
+          ${radio(
+            "business",
+            "① 仅清业务流水",
+            "清空进货 / 销售 / 退货单据与明细、库存流水、分佣、余额流水、退换货申请；商品库存与客户余额同步归零。账号、商品档案、分类、供应商、系统设置全部保留。",
+            `共 ${biz.length} 张表 · 当前 ${bizRows.toLocaleString("zh-CN")} 行`
+          )}
+          ${radio(
+            "factory",
+            "② 恢复出厂",
+            "在 ① 的基础上再清空商品档案、分类、供应商，以及除当前登录管理员外的全部账号（含客户、销售员）与其密保、审计日志、登录记录，并注销其他在线会话。系统设置与 R2 文件保留。",
+            `共 ${fac.length + 2} 张表 · 当前 ${facRows.toLocaleString("zh-CN")} 行`
+          )}
+        </div>
+        <div class="table-wrap"><table class="table">
+          <thead><tr><th>数据项</th><th class="num">当前行数</th><th>清空范围</th></tr></thead>
+          <tbody>${countRows}</tbody>
+        </table></div>
+        <div class="form-row mt">
+          ${field(
+            "确认口令",
+            `<input type="text" name="confirm_phrase" placeholder="请输入：${esc(d.keyword)}" autocomplete="off" required>`,
+            `口令需与「${esc(d.keyword)}」完全一致，服务端校验后才会执行`,
+            true
+          )}
+        </div>
+        <button class="btn danger" type="submit">🗑️ 确认清空数据</button>
+      </form>
+    </div>`;
+
   return `
     ${pageHead("🗄️ 云端数据备份与灾难恢复", "全量业务数据支持一键快照至 Cloudflare R2 对象存储或导出至本地")}
     <div class="grid cols-2">
@@ -672,7 +742,7 @@ export function maintenancePage(ctx: ViewCtx, d: { backups: BackupInfo[]; keep: 
             <button class="btn small primary" type="submit">＋ 立即创建快照</button>
           </form>
         </div>
-        <p class="muted small mb">包含用户、密保、商品、分类、供应商、进销退单据、库存流水、分佣记录与系统设置全量表。</p>
+        <p class="muted small mb">包含用户、密保、商品、分类、供应商、进销退单据与明细、退换货申请、库存流水、分佣记录、余额流水与系统设置全量表。</p>
         <div class="backup-list">${rows}</div>
       </div>
       <div class="card">
@@ -688,9 +758,11 @@ export function maintenancePage(ctx: ViewCtx, d: { backups: BackupInfo[]; keep: 
         <ul class="guide-list">
           <li>在进行大批量调价、盘点或人员结构调整前，建议先点击「立即创建快照」。</li>
           <li>建议每月定期下载一份备份 JSON 文件保存在本地离线介质中，实现异地双备份。</li>
+          <li>「清空数据」每次执行前都会自动落一份 <code>preclear-</code> 快照，可在上方列表下载留档。</li>
         </ul>
       </div>
-    </div>`;
+    </div>
+    ${clearCard}`;
 }
 
 // ================= 操作日志 =================

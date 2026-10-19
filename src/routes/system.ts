@@ -2,7 +2,7 @@
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { AppEnv, SafeUser } from "../env";
-import { Store, paymentName, movementTypeName } from "../db";
+import { Store, paymentName, movementTypeName, CLEAR_DATA_KEYWORD, type ClearScope } from "../db";
 import { layout, errorPage } from "../views/layout";
 import {
   reportPage,
@@ -724,11 +724,14 @@ export function registerSystem(app: Hono<AppEnv>) {
   // ================= 备份维护（管理员） =================
   app.get("/maintenance", async (c) => {
     try {
-      needRoles(c, ["admin"]);
+      const admin = needRoles(c, ["admin"]);
       const s = store(c);
-      const [listed, settings] = await Promise.all([
+      const sid = sidFromCookie(c);
+      const digest = sid ? await sha256hex(sid) : "";
+      const [listed, settings, counts] = await Promise.all([
         c.env.R2.list({ prefix: "backups/" }),
         s.getSettings(),
+        s.clearCounts(admin.id, digest),
       ]);
       const backups = (listed.objects || [])
         .map((o) => ({
@@ -743,7 +746,13 @@ export function registerSystem(app: Hono<AppEnv>) {
           title: "备份维护",
           ctx,
           active: "maintenance",
-          content: maintenancePage(ctx, { backups, keep: settings.backup_keep || "14" }),
+          content: maintenancePage(ctx, {
+            backups,
+            keep: settings.backup_keep || "14",
+            counts,
+            plan: Store.clearPlan(),
+            keyword: CLEAR_DATA_KEYWORD,
+          }),
         })
       );
     } catch (e) {
@@ -831,6 +840,40 @@ export function registerSystem(app: Hono<AppEnv>) {
     } catch (e) {
       if (e instanceof HTTPException) throw e;
       return redirectWith(c, "/maintenance", undefined, "删除失败：" + (e as Error).message);
+    }
+  });
+
+  app.post("/maintenance/clear", async (c) => {
+    const me = needRoles(c, ["admin"]);
+    const s = store(c);
+    try {
+      const { fields } = await parseForm(c);
+      const scope: ClearScope = fields.scope === "factory" ? "factory" : "business";
+      if ((fields.confirm_phrase || "").trim() !== CLEAR_DATA_KEYWORD) {
+        return redirectWith(c, "/maintenance", undefined, `确认口令不正确，请输入「${CLEAR_DATA_KEYWORD}」`);
+      }
+      const sid = sidFromCookie(c);
+      const sessionDigest = sid ? await sha256hex(sid) : "";
+
+      // 先落 R2 快照，快照失败直接中止，不允许在无备份的情况下清空
+      const data = await s.exportBackup();
+      const snapKey = `backups/preclear-${todayUTC8()}-${Date.now()}.json`;
+      await c.env.R2.put(snapKey, JSON.stringify(data), { httpMetadata: { contentType: "application/json" } });
+
+      const deleted = await s.clearData(scope, { userId: me.id, sessionDigest });
+      const summary = Store.clearPlan()
+        .filter((p) => scope === "factory" || p.scope === "business")
+        .map((p) => `${p.label} ${deleted[p.table] || 0}`)
+        .join("、");
+      const detail =
+        `${scope === "factory" ? "恢复出厂" : "仅清业务流水"}：${summary}` +
+        (scope === "factory" ? `、其他账号 ${deleted.users || 0}、注销会话 ${deleted.sessions || 0}` : "") +
+        `；清空前快照 ${snapKey}`;
+      await s.audit(me.id, "清空数据", "备份维护", detail, clientIP(c));
+      return redirectWith(c, "/maintenance", `数据已清空，清空前快照 ${snapKey} 已存入 R2，可随时下载或恢复`);
+    } catch (e) {
+      if (e instanceof HTTPException) throw e;
+      return redirectWith(c, "/maintenance", undefined, "清空失败：" + (e as Error).message);
     }
   });
 

@@ -2427,8 +2427,10 @@ export class Store {
       "sales_items",
       "return_orders",
       "return_items",
+      "return_requests",
       "stock_movements",
       "commissions",
+      "balance_logs",
       "audit_logs",
       "settings",
     ];
@@ -2466,4 +2468,88 @@ export class Store {
     }
     schemaReady = false;
   }
+
+  // ============ 数据清空 ============
+
+  /** 清空动作的表清单与展示口径：business 属于两档共有，factory 仅在恢复出厂时清空 */
+  static clearPlan(): { table: string; label: string; scope: ClearScope }[] {
+    return [
+      { table: "purchase_items", label: "进货商品明细", scope: "business" },
+      { table: "purchase_orders", label: "进货单", scope: "business" },
+      { table: "sales_items", label: "销售商品明细", scope: "business" },
+      { table: "sales_orders", label: "销售单", scope: "business" },
+      { table: "return_items", label: "退货商品明细", scope: "business" },
+      { table: "return_orders", label: "退货单", scope: "business" },
+      { table: "return_requests", label: "客户退换货申请", scope: "business" },
+      { table: "stock_movements", label: "库存流水", scope: "business" },
+      { table: "commissions", label: "分佣记录", scope: "business" },
+      { table: "balance_logs", label: "客户余额流水", scope: "business" },
+      { table: "products", label: "商品档案", scope: "factory" },
+      { table: "categories", label: "商品分类", scope: "factory" },
+      { table: "suppliers", label: "供应商", scope: "factory" },
+      { table: "login_attempts", label: "登录尝试记录", scope: "factory" },
+      { table: "recovery_attempts", label: "找回密码尝试记录", scope: "factory" },
+      { table: "audit_logs", label: "审计日志", scope: "factory" },
+    ];
+  }
+
+  /** 清空前预览：key 为表名，users / sessions 按「实际会被删除的行数」统计 */
+  async clearCounts(keepUserId: number, keepSessionDigest: string): Promise<Record<string, number>> {
+    const items = [
+      ...Store.clearPlan().map((p) => ({
+        table: p.table,
+        stmt: this.db.prepare(`SELECT COUNT(*) AS c FROM ${p.table}`),
+      })),
+      { table: "users", stmt: this.db.prepare("SELECT COUNT(*) AS c FROM users WHERE id<>?").bind(keepUserId) },
+      {
+        table: "sessions",
+        stmt: this.db.prepare("SELECT COUNT(*) AS c FROM sessions WHERE id<>?").bind(keepSessionDigest),
+      },
+    ];
+    const res = await this.db.batch(items.map((i) => i.stmt));
+    const out: Record<string, number> = {};
+    res.forEach((r, idx) => {
+      const row = (r.results || [])[0] as { c: number } | undefined;
+      out[items[idx].table] = Number(row?.c || 0);
+    });
+    return out;
+  }
+
+  /**
+   * 执行清空，返回各表删除前的行数。
+   * business：单据与各类流水清空后，商品库存、客户余额同步归零（否则与已清空的流水对不上账）；
+   * factory：额外清空基础资料与除当前管理员外的全部账号，并注销除当前会话外的所有会话。
+   * 两档均保留 settings 表与 R2 中的图片对象。
+   */
+  async clearData(
+    scope: ClearScope,
+    keep: { userId: number; sessionDigest: string }
+  ): Promise<Record<string, number>> {
+    const plan = Store.clearPlan().filter((p) => scope === "factory" || p.scope === "business");
+    const before = await this.clearCounts(keep.userId, keep.sessionDigest);
+    const stmts: D1PreparedStatement[] = plan.map((p) => this.db.prepare(`DELETE FROM ${p.table}`));
+    if (scope === "business") {
+      stmts.push(this.db.prepare("UPDATE products SET stock=0"));
+      stmts.push(this.db.prepare("UPDATE users SET balance=0"));
+    } else {
+      stmts.push(this.db.prepare("DELETE FROM users WHERE id<>?").bind(keep.userId));
+      stmts.push(this.db.prepare("DELETE FROM security_questions WHERE user_id<>?").bind(keep.userId));
+      stmts.push(this.db.prepare("DELETE FROM sessions WHERE id<>?").bind(keep.sessionDigest));
+    }
+    for (let i = 0; i < stmts.length; i += 40) await this.db.batch(stmts.slice(i, i + 40));
+
+    const deleted: Record<string, number> = {};
+    for (const p of plan) deleted[p.table] = before[p.table] || 0;
+    if (scope === "factory") {
+      deleted["users"] = before["users"] || 0;
+      deleted["sessions"] = before["sessions"] || 0;
+    }
+    return deleted;
+  }
 }
+
+/** 清空数据范围：business 仅业务流水，factory 恢复出厂 */
+export type ClearScope = "business" | "factory";
+
+/** 清空数据确认口令：服务端精确比对，前端仅负责展示 */
+export const CLEAR_DATA_KEYWORD = "清空所有数据";
