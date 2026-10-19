@@ -664,6 +664,9 @@ export function registerSystem(app: Hono<AppEnv>) {
         "commission_l1_override",
         "backup_keep",
         "payment_note",
+        "bank_account_name",
+        "bank_name",
+        "bank_account_no",
       ]) {
         if (fields[k] !== undefined) {
           await s.setSetting(k, (fields[k] || "").trim().slice(0, 200));
@@ -706,8 +709,8 @@ export function registerSystem(app: Hono<AppEnv>) {
         }
       }
 
-      await s.audit(me.id, "系统设置", "设置", "更新系统参数与微信/支付宝收款二维码设置", clientIP(c));
-      return redirectWith(c, "/settings", "系统设置与收款二维码已保存");
+      await s.audit(me.id, "系统设置", "设置", "更新系统参数与收款方式（微信/支付宝/银行转账）设置", clientIP(c));
+      return redirectWith(c, "/settings", "系统设置与收款信息已保存");
     } catch (e) {
       if (e instanceof HTTPException) throw e;
       return redirectWith(c, "/settings", undefined, "保存失败：" + (e as Error).message);

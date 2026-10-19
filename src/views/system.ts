@@ -469,20 +469,22 @@ export function settingsPage(ctx: ViewCtx, s: Record<string, string>): string {
   const v = (k: string): string => esc(s[k] ?? "");
   const wechatQr = s["wechat_qr_key"] ? fileUrl(s["wechat_qr_key"]) : "";
   const alipayQr = s["alipay_qr_key"] ? fileUrl(s["alipay_qr_key"]) : "";
+  const hasBank = !!(s["bank_account_name"] || s["bank_name"] || s["bank_account_no"]);
 
   return `
-    ${pageHead("⚙️ 全局系统参数与收款设置", "配置品牌名称、微信/支付宝收款二维码、客户注册开关、二级分销默认比例与自动备份策略")}
+    ${pageHead("⚙️ 全局系统参数与收款设置", "配置品牌名称、微信/支付宝收款二维码、银行转账信息、客户注册开关、二级分销默认比例与自动备份策略")}
     <form method="post" action="/settings" enctype="multipart/form-data">
       ${csrfInput(ctx.csrf)}
       <div class="card highlight-card" id="payqr">
         <div class="card-head">
-          <h3>💳 收款设置（微信收款二维码 / 支付宝收款二维码）</h3>
+          <h3>💳 收款设置（微信 / 支付宝收款码 · 银行转账信息）</h3>
           <span>
             ${wechatQr ? badge("微信码已配置", "green") : badge("微信码未上传", "gray")}
             ${alipayQr ? badge("支付宝码已配置", "blue") : badge("支付宝码未上传", "gray")}
+            ${hasBank ? badge("银行转账已配置", "green") : badge("银行转账未填写", "gray")}
           </span>
         </div>
-        <p class="muted small mb">上传商家收款码图片（支持 JPG / PNG / WebP，存入 Cloudflare R2）。配置后将在<strong>销售开单、客户自助下单、订单详情及欠款补收核销</strong>页面自动展示供客户扫码付款。</p>
+        <p class="muted small mb">配置后将在<strong>销售开单、客户自助下单、订单详情及欠款补收核销</strong>页面按客户所选结算方式自动展示对应收款信息。</p>
         <div class="grid cols-2 mb">
           <div class="payqr-upload-box wechat">
             <div class="payqr-box-head">
@@ -534,10 +536,22 @@ export function settingsPage(ctx: ViewCtx, s: Record<string, string>): string {
             }
           </div>
         </div>
+        <div class="payqr-upload-box bank">
+          <div class="payqr-box-head">
+            <span class="payqr-brand-tag bank">🏦 银行转账收款信息（Bank Transfer）</span>
+            ${hasBank ? badge("已生效", "green") : badge("待填写", "yellow")}
+          </div>
+          <p class="muted small" style="margin:0">客户选择「银行转账」结算时，将直接展示以下信息供其网银/手机银行转账。</p>
+          <div class="form-row cols-3">
+            ${field("收款户名", `<input type="text" name="bank_account_name" maxlength="64" value="${v("bank_account_name")}" placeholder="如：深圳市进销通科技有限公司">`, "与银行开户名称完全一致")}
+            ${field("开户银行（含支行）", `<input type="text" name="bank_name" maxlength="100" value="${v("bank_name")}" placeholder="如：中国工商银行深圳科技园支行">`, "建议写到支行，便于客户准确选择")}
+            ${field("银行账号", `<input type="text" name="bank_account_no" maxlength="64" value="${v("bank_account_no")}" placeholder="如：4000 0123 4567 8901">`, "支持对公账户或对私账户")}
+          </div>
+        </div>
         ${field(
-          "扫码收款备注说明（选填）",
-          `<input type="text" name="payment_note" maxlength="200" value="${v("payment_note")}" placeholder="例如：扫码付款请备注【客户名称+订单号】，转账后请联系客服确认核销">`,
-          "将展示在收款二维码下方提示客户"
+          "收款备注说明（选填）",
+          `<input type="text" name="payment_note" maxlength="200" value="${v("payment_note")}" placeholder="例如：付款请备注【客户名称+订单号】，转账后请联系客服确认核销">`,
+          "将展示在收款二维码 / 银行转账信息下方提示客户"
         )}
       </div>
 
@@ -567,7 +581,7 @@ export function settingsPage(ctx: ViewCtx, s: Record<string, string>): string {
         ${field("自动备份保留份数", `<input type="number" name="backup_keep" min="1" max="60" step="1" value="${v("backup_keep") || "14"}">`, "每日凌晨 3:00 定时任务自动备份至 R2，超出保留份数的旧备份将自动轮转清理")}
       </div>
       <div class="btn-row">
-        <button class="btn primary" type="submit">💾 保存系统设置与收款二维码</button>
+        <button class="btn primary" type="submit">💾 保存系统设置与收款信息</button>
       </div>
     </form>`;
 }

@@ -202,6 +202,9 @@ export function registerStock(app: Hono<AppEnv>) {
         s.listSalesUsers(),
       ]);
       const ctx = pageCtx(c);
+      // 从「商品档案」点「开单」带入的商品（仅上架商品可开单）
+      const pidQ = parseInt(c.req.query("product_id") || "", 10) || 0;
+      const preselectPid = pidQ && prods.rows.some((p) => p.id === pidQ) ? pidQ : undefined;
       return c.html(
         layout({
           title: "新增销售单",
@@ -214,6 +217,7 @@ export function registerStock(app: Hono<AppEnv>) {
             action: "/sales/new",
             forCustomer: false,
             defaultSalesId: me.role === "sales" ? me.id : undefined,
+            preselectPid,
           }),
         })
       );
@@ -364,13 +368,51 @@ export function registerStock(app: Hono<AppEnv>) {
         s.listUsers({ role: "customer", page: 1, pageSize: 200 }),
       ]);
       const soNo = (c.req.query("order_no") || "").trim();
+
+      // 带 order_no 进来时，自动按原销售单带出商品明细与成交单价
+      let prefillLines: { product: Product; qty: number; price: number }[] = [];
+      let defaultCustomerId: number | null = null;
+      let orderHint = "";
+      if (soNo) {
+        const r = await s.listSalesOrders({ q: soNo, page: 1, pageSize: 10 });
+        const hit = r.rows.find((x) => x.order_no === soNo);
+        if (!hit) {
+          orderHint = `未找到销售单号 ${soNo}，请手动选择需要退货的商品。`;
+        } else if (hit.status !== "done") {
+          orderHint = `销售单 ${soNo} 已作废，无法办理退货。`;
+        } else {
+          const full = await s.getSalesOrder(hit.id);
+          defaultCustomerId = full?.customer_id ?? null;
+          const byId = new Map(prods.rows.map((p) => [p.id, p]));
+          for (const it of full?.items || []) {
+            let p = byId.get(it.product_id);
+            if (!p) {
+              p = (await s.getProduct(it.product_id)) || undefined;
+              if (p) {
+                byId.set(p.id, p);
+                prods.rows.push(p);
+              }
+            }
+            if (p) prefillLines.push({ product: p, qty: it.qty, price: it.price });
+          }
+          if (prefillLines.length === 0) orderHint = `销售单 ${soNo} 未查询到可退商品明细，请手动选择。`;
+        }
+      }
+
       const ctx = pageCtx(c);
       return c.html(
         layout({
           title: "新增退货单",
           ctx,
           active: "returns",
-          content: returnFormPage(ctx, { products: prods.rows, customers: customersRes.rows, defaultOrderNo: soNo }),
+          content: returnFormPage(ctx, {
+            products: prods.rows,
+            customers: customersRes.rows,
+            defaultOrderNo: soNo,
+            defaultCustomerId,
+            prefillLines,
+            orderHint,
+          }),
         })
       );
     } catch (e) {

@@ -119,13 +119,50 @@
       }
       var label = paySel.selectedOptions[0] ? paySel.selectedOptions[0].textContent : "该结算方式";
       emptyEl.hidden = false;
-      emptyEl.textContent =
-        val === "wechat" || val === "alipay"
-          ? "商家暂未上传" + (val === "alipay" ? "支付宝" : "微信") + "收款码，请更换结算方式或联系客服确认。"
-          : "「" + label + "」无需扫码支付，按约定结算即可。";
+      if (val === "wechat" || val === "alipay") {
+        emptyEl.textContent =
+          "商家暂未上传" + (val === "alipay" ? "支付宝" : "微信") + "收款码，请更换结算方式或联系客服确认。";
+      } else if (val === "bank") {
+        emptyEl.textContent = "商家暂未填写银行转账收款信息，请更换结算方式或联系客服确认。";
+      } else {
+        emptyEl.textContent = "「" + label + "」无需扫码支付，按约定结算即可。";
+      }
     }
     paySel.addEventListener("change", syncActive);
     syncActive();
+  }
+
+  // ---------- 5c. 银行账号一键复制 ----------
+  function copyButtons() {
+    document.addEventListener("click", function (e) {
+      var btn = e.target && e.target.closest ? e.target.closest("[data-copy-text]") : null;
+      if (!btn) return;
+      var text = btn.getAttribute("data-copy-text") || "";
+      if (!text) return;
+      var ok = function () {
+        toast("已复制：" + text);
+      };
+      var fallback = function () {
+        var ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+          document.execCommand("copy");
+          ok();
+        } catch (err) {
+          toast("复制失败，请手动选择账号", true);
+        }
+        document.body.removeChild(ta);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(ok).catch(fallback);
+      } else {
+        fallback();
+      }
+    });
   }
 
   // ---------- 6. 订单明细动态行、客户收货地址自动带出与折扣/实收联动 ----------
@@ -588,6 +625,7 @@
     sidebarAndActions();
     imgPreview();
     paymentQrSwitcher();
+    copyButtons();
     orderItems();
     salesLevel();
     trendChart();

@@ -40,6 +40,10 @@ export interface ProductListData {
   categoryId: string;
   status?: string;
   canEdit: boolean;
+  /** 可开销售单（管理员 / 销售员） */
+  canSell?: boolean;
+  /** 可办理进货入库（仅管理员） */
+  canPurchase?: boolean;
 }
 
 export function productListPage(ctx: ViewCtx, d: ProductListData): string {
@@ -67,13 +71,25 @@ export function productListPage(ctx: ViewCtx, d: ProductListData): string {
             const img = p.image_key
               ? `<img class="thumb" src="${fileUrl(p.image_key)}" alt="${esc(p.name)}" loading="lazy">`
               : `<img class="thumb" src="${PLACEHOLDER}" alt="无图片" loading="lazy">`;
-            const actions = d.canEdit
-              ? `<div class="btn-row">
-                  <a class="btn small secondary" href="/products/${p.id}/edit">编辑</a>
-                  <form class="inline-form" method="post" action="/products/${p.id}/toggle">${csrfInput(ctx.csrf)}<button class="btn small secondary" type="submit">${p.status === "on" ? "下架" : "上架"}</button></form>
-                  <form class="inline-form" method="post" action="/products/${p.id}/delete" data-confirm="确定删除商品「${esc(p.name)}」吗？已有库存流水的商品不可删除。">${csrfInput(ctx.csrf)}<button class="btn small danger" type="submit">删除</button></form>
-                </div>`
-              : `<span class="muted small">只读</span>`;
+            const bizBtns = [
+              d.canPurchase
+                ? `<a class="btn small secondary" href="/purchase/new?product_id=${p.id}" title="以该商品新建进货单">📥 进货</a>`
+                : "",
+              d.canSell && p.status === "on"
+                ? `<a class="btn small primary" href="/sales/new?product_id=${p.id}" title="以该商品新建销售单">🧾 开单</a>`
+                : "",
+            ]
+              .filter(Boolean)
+              .join("");
+            const manageBtns = d.canEdit
+              ? `<a class="btn small secondary" href="/products/${p.id}/edit">编辑</a>
+                 <form class="inline-form" method="post" action="/products/${p.id}/toggle">${csrfInput(ctx.csrf)}<button class="btn small secondary" type="submit">${p.status === "on" ? "下架" : "上架"}</button></form>
+                 <form class="inline-form" method="post" action="/products/${p.id}/delete" data-confirm="确定删除商品「${esc(p.name)}」吗？已有库存流水的商品不可删除。">${csrfInput(ctx.csrf)}<button class="btn small danger" type="submit">删除</button></form>`
+              : "";
+            const actions =
+              bizBtns || manageBtns
+                ? `<div class="btn-row product-actions">${bizBtns}${manageBtns}</div>`
+                : `<span class="muted small">只读</span>`;
             return `<tr>
               <td>${img}</td>
               <td>

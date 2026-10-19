@@ -63,6 +63,8 @@ export function registerProducts(app: Hono<AppEnv>) {
             categoryId: categoryIdQ,
             status,
             canEdit: me.role === "admin",
+            canSell: me.role === "admin" || me.role === "sales",
+            canPurchase: me.role === "admin",
           }),
         })
       );

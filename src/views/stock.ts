@@ -31,34 +31,59 @@ function tp(total: number, pageSize: number): number {
   return Math.max(1, Math.ceil(total / pageSize));
 }
 
-/** 渲染微信收款码 / 支付宝收款码展示面板（用于开单、自助下单、订单详情与欠款核销）
- *  只展示当前「结算方式」对应的那一个二维码，其余由 app.js 在切换下拉框时联动显隐。 */
-export function paymentQrWidget(ctx: ViewCtx, activeMethod?: string, heading = "📲 扫码收款二维码（微信支付 / 支付宝）"): string {
+/** 渲染收款信息面板（微信码 / 支付宝码 / 银行转账信息）
+ *  只展示当前「结算方式」对应的那一块，其余由 app.js 在切换下拉框时联动显隐。 */
+export function paymentQrWidget(
+  ctx: ViewCtx,
+  activeMethod?: string,
+  heading = "📲 收款信息（微信 / 支付宝 / 银行转账）"
+): string {
   const wechatKey = ctx.settings?.wechat_qr_key || "";
   const alipayKey = ctx.settings?.alipay_qr_key || "";
   const note = ctx.settings?.payment_note || "";
   const wechatUrl = wechatKey ? fileUrl(wechatKey) : "";
   const alipayUrl = alipayKey ? fileUrl(alipayKey) : "";
-  const active = activeMethod === "alipay" ? "alipay" : "wechat";
-  const activeUrl = active === "alipay" ? alipayUrl : wechatUrl;
 
-  if (!wechatUrl && !alipayUrl) {
+  const bankAccountName = (ctx.settings?.bank_account_name || "").trim();
+  const bankName = (ctx.settings?.bank_name || "").trim();
+  const bankAccountNo = (ctx.settings?.bank_account_no || "").trim();
+  const hasBank = !!(bankAccountName || bankName || bankAccountNo);
+
+  const active: "wechat" | "alipay" | "bank" | "none" =
+    activeMethod === "alipay"
+      ? "alipay"
+      : activeMethod === "bank"
+        ? "bank"
+        : activeMethod === "cash" || activeMethod === "credit"
+          ? "none"
+          : "wechat";
+  const activeExists = active === "wechat" ? !!wechatUrl : active === "alipay" ? !!alipayUrl : active === "bank" ? hasBank : false;
+
+  if (!wechatUrl && !alipayUrl && !hasBank) {
     if (ctx.user?.role === "admin") {
       return `<div class="payqr-hint-bar no-print">
-        <span>💡 暂未上传收款二维码（上传后可在此处直接展示微信/支付宝二维码供客户扫码付款）</span>
-        <a class="btn small secondary" href="/settings#payqr">⚙️ 前往设置收款码 →</a>
+        <span>💡 暂未配置收款信息（上传微信/支付宝收款码或填写银行转账信息后，客户下单时可直接看到）</span>
+        <a class="btn small secondary" href="/settings#payqr">⚙️ 前往设置收款方式 →</a>
       </div>`;
     }
     return "";
   }
+
+  const emptyText = activeExists
+    ? ""
+    : active === "bank"
+      ? "商家暂未填写银行转账收款信息，请更换结算方式或联系客服确认。"
+      : active === "none"
+        ? `「${paymentName(activeMethod || "cash")}」无需扫码支付，按约定结算即可。`
+        : `商家暂未上传${active === "alipay" ? "支付宝" : "微信"}收款码，请更换结算方式或联系客服确认。`;
 
   return `<div class="payqr-panel" id="paymentQrBox" data-active-method="${active}">
     <div class="payqr-panel-head">
       <strong>${esc(heading)}</strong>
       ${
         ctx.user?.role === "admin"
-          ? `<a class="small no-print" href="/settings#payqr">⚙️ 管理收款码</a>`
-          : `<span class="muted small">切换结算方式将自动显示对应收款码</span>`
+          ? `<a class="small no-print" href="/settings#payqr">⚙️ 管理收款方式</a>`
+          : `<span class="muted small">切换结算方式将自动显示对应收款信息</span>`
       }
     </div>
     <div class="payqr-cards">
@@ -82,10 +107,27 @@ export function paymentQrWidget(ctx: ViewCtx, activeMethod?: string, heading = "
             </div>`
           : ""
       }
+      ${
+        hasBank
+          ? `<div class="payqr-item bank${active === "bank" ? " active" : ""}" data-payqr-card="bank"${
+              active === "bank" ? "" : " hidden"
+            }>
+              <div class="payqr-tag bank">🏦 银行转账信息</div>
+              <dl class="bank-kv">
+                <div><dt>收款户名</dt><dd>${esc(bankAccountName || "—")}</dd></div>
+                <div><dt>开户银行</dt><dd>${esc(bankName || "—")}</dd></div>
+                <div><dt>银行账号</dt><dd><code class="bank-no">${esc(bankAccountNo || "—")}</code>${
+                  bankAccountNo
+                    ? ` <button type="button" class="btn small secondary no-print" data-copy-text="${esc(bankAccountNo)}">复制</button>`
+                    : ""
+                }</dd></div>
+              </dl>
+              <p class="bank-tip">转账后请保留回单并联系客服核对到账，备注中建议填写订单号。</p>
+            </div>`
+          : ""
+      }
     </div>
-    <div class="payqr-empty-method" data-payqr-empty${activeUrl ? " hidden" : ""}>${
-      activeUrl ? "" : `商家暂未上传${active === "alipay" ? "支付宝" : "微信"}收款码，请更换结算方式或联系客服确认。`
-    }</div>
+    <div class="payqr-empty-method" data-payqr-empty${activeExists ? " hidden" : ""}>${esc(emptyText)}</div>
     ${note ? `<div class="payqr-note">📌 ${esc(note)}</div>` : ""}
   </div>`;
 }
@@ -105,22 +147,31 @@ function productOptions(
     .join("");
 }
 
+interface ItemRowOpts {
+  preselectPid?: number;
+  initQty?: number;
+  /** 来自购物车时写入 data-cart-id，删行时同步清理购物车 */
+  cartId?: number;
+  lockPrice?: boolean;
+  /** 预填单价（退货单从原销售单带入，优先于商品标准价） */
+  priceOverride?: number;
+}
+
 function itemRow(
   products: Product[],
   priceKey: "purchase_price" | "sale_price",
-  preselectPid?: number,
-  initQty = 1,
-  cartId?: number,
-  lockPrice = false
+  o: ItemRowOpts = {}
 ): string {
-  const preProd = preselectPid ? products.find((x) => x.id === preselectPid) : undefined;
-  const initPrice = preProd ? String(preProd[priceKey]) : "";
-  const initAmt = preProd ? money(round2(preProd[priceKey] * initQty)) : "¥0.00";
-  return `<div class="item-row"${cartId ? ` data-cart-id="${cartId}"` : ""}>
-    <select name="product_id" data-role="item-product" required><option value="">— 请选择商品（支持名称/SKU检索） —</option>${productOptions(products, priceKey, preselectPid)}</select>
+  const initQty = o.initQty ?? 1;
+  const preProd = o.preselectPid ? products.find((x) => x.id === o.preselectPid) : undefined;
+  const unitPrice = o.priceOverride !== undefined ? o.priceOverride : preProd ? preProd[priceKey] : undefined;
+  const initPrice = unitPrice !== undefined ? String(unitPrice) : "";
+  const initAmt = unitPrice !== undefined ? money(round2(unitPrice * initQty)) : "¥0.00";
+  return `<div class="item-row"${o.cartId ? ` data-cart-id="${o.cartId}"` : ""}>
+    <select name="product_id" data-role="item-product" required><option value="">— 请选择商品（支持名称/SKU检索） —</option>${productOptions(products, priceKey, o.preselectPid)}</select>
     <input type="number" name="qty" data-role="item-qty" min="0.01" step="0.01" value="${initQty}" placeholder="数量" required>
     <input type="number" name="price" data-role="item-price" min="0" step="0.01" value="${initPrice}" placeholder="单价(元)" required${
-      lockPrice ? ' readonly title="客户自助下单按系统标准售价结算，不可改价"' : ""
+      o.lockPrice ? ' readonly title="客户自助下单按系统标准售价结算，不可改价"' : ""
     }>
     <span class="amount" data-role="item-amount">${initAmt}</span>
     <button type="button" class="row-del" data-action="remove-row" title="删除该明细行">✕</button>
@@ -131,7 +182,9 @@ export interface OrderItemsOptions {
   preselectPid?: number;
   /** 购物车带入的明细（客户自助下单） */
   cartLines?: { product: Product; qty: number }[];
-  /** 是否保留「＋ 添加商品行」按钮（自助下单场景关闭） */
+  /** 从原销售单带入的退货明细（可带原成交单价） */
+  prefillLines?: { product: Product; qty: number; price?: number }[];
+  /** 是否保留「＋ 添加商品行」按钮（自助下单 / 退货单场景关闭） */
   allowAddRow?: boolean;
   /** 底部「＋ 继续添加商品」改为跳转链接（自助下单 → 商品目录） */
   addRowHref?: string;
@@ -147,12 +200,39 @@ function orderItemsBlock(
   opts: OrderItemsOptions = {}
 ): string {
   const allowAddRow = opts.allowAddRow !== false;
+  const prefill = opts.prefillLines || [];
+  const cart = opts.cartLines || [];
   const rows =
-    opts.cartLines && opts.cartLines.length > 0
-      ? opts.cartLines
-          .map((l) => itemRow(products, priceKey, l.product.id, l.qty, l.product.id, opts.lockPrice))
+    prefill.length > 0
+      ? prefill
+          .map((l) =>
+            itemRow(products, priceKey, {
+              preselectPid: l.product.id,
+              initQty: l.qty,
+              lockPrice: opts.lockPrice,
+              priceOverride: l.price,
+            })
+          )
           .join("")
-      : itemRow(products, priceKey, opts.preselectPid, 1, undefined, opts.lockPrice);
+      : cart.length > 0
+        ? cart
+            .map((l) =>
+              itemRow(products, priceKey, {
+                preselectPid: l.product.id,
+                initQty: l.qty,
+                cartId: l.product.id,
+                lockPrice: opts.lockPrice,
+              })
+            )
+            .join("")
+        : itemRow(products, priceKey, { preselectPid: opts.preselectPid, lockPrice: opts.lockPrice });
+
+  // 底部「继续添加」：给了跳转链接就渲染链接；否则仅在允许加行时渲染按钮
+  const bottomAdd = opts.addRowHref
+    ? `<a class="btn secondary" href="${esc(opts.addRowHref)}">＋ 继续添加商品</a>`
+    : allowAddRow
+      ? `<button type="button" class="btn secondary" data-action="add-row">＋ 继续添加商品</button>`
+      : "";
 
   return `<div class="card">
     <div class="card-head">
@@ -169,11 +249,7 @@ function orderItemsBlock(
     </div>
     <div id="orderItems">${rows}</div>
     <div class="order-summary-bar">
-      ${
-        opts.addRowHref
-          ? `<a class="btn secondary" href="${esc(opts.addRowHref)}">＋ 继续添加商品</a>`
-          : `<button type="button" class="btn secondary" data-action="add-row">＋ 继续添加商品</button>`
-      }
+      ${bottomAdd}
       <div class="order-total" id="orderTotal">合计：<span>¥0.00</span></div>
     </div>
   </div>`;
@@ -395,6 +471,8 @@ export interface SalesFormData {
   forCustomer: boolean;
   defaultSalesId?: number | null;
   customerProfile?: User | null;
+  /** 从「商品档案」点「开单」带入的商品 */
+  preselectPid?: number;
   /** 客户自助下单：由「商品目录」购物车带入的明细 */
   cart?: {
     lines: { product: Product; qty: number }[];
@@ -543,7 +621,7 @@ export function salesFormPage(ctx: ViewCtx, d: SalesFormData): string {
               headHint: cartHint,
               lockPrice: true,
             })
-          : orderItemsBlock(sellable, "sale_price")
+          : orderItemsBlock(sellable, "sale_price", { preselectPid: d.preselectPid })
       }
       <div class="btn-row">
         <button class="btn primary" type="submit">${isCustomer ? "🛒 确认提交订单" : "✅ 确认开单并出库"}</button>
@@ -591,7 +669,7 @@ export function salesDetailPage(ctx: ViewCtx, o: SalesOrder, canVoid: boolean): 
                 </form>`
               : ""
           }
-          ${paymentQrWidget(ctx, o.payment === "alipay" ? "alipay" : "wechat", "📲 扫码支付尾款（微信 / 支付宝）")}
+          ${paymentQrWidget(ctx, o.payment, "📲 支付尾款（微信 / 支付宝 / 银行转账）")}
         </div>`
       : "";
 
@@ -696,13 +774,36 @@ export function returnListPage(
     </div>`;
 }
 
-export function returnFormPage(
-  ctx: ViewCtx,
-  d: { products: Product[]; customers: User[]; defaultOrderNo?: string }
-): string {
+export interface ReturnFormData {
+  products: Product[];
+  customers: User[];
+  defaultOrderNo?: string;
+  defaultCustomerId?: number | null;
+  /** 从原销售单带入的退货明细 */
+  prefillLines?: { product: Product; qty: number; price?: number }[];
+  /** 原销售单校验失败 / 未找到时的提示 */
+  orderHint?: string;
+}
+
+export function returnFormPage(ctx: ViewCtx, d: ReturnFormData): string {
   const cusOptions = [`<option value="">— 不关联客户（或从原销售单自动带出） —</option>`]
-    .concat(d.customers.map((u) => `<option value="${u.id}">${esc(u.nickname)}（@${esc(u.username)}）</option>`))
+    .concat(
+      d.customers.map(
+        (u) =>
+          `<option value="${u.id}"${d.defaultCustomerId === u.id ? " selected" : ""}>${esc(u.nickname)}（@${esc(
+            u.username
+          )}）</option>`
+      )
+    )
     .join("");
+
+  const prefill = d.prefillLines || [];
+  const hasPrefill = prefill.length > 0;
+  const headHint = hasPrefill
+    ? `↩️ 已按原销售单 <strong>${esc(d.defaultOrderNo || "")}</strong> 自动带入 <strong>${prefill.length}</strong> 款商品，并沿用原成交单价；请修改实际退货数量，不需要退货的行可直接删除。`
+    : d.orderHint
+      ? `<span class="neg">${esc(d.orderHint)}</span>`
+      : "";
 
   return `
     ${pageHead("＋ 新建销售退货单", "校验原销售单可退数量并自动回补商品库存", `<a class="btn secondary" href="/returns">← 返回退货列表</a>`)}
@@ -715,7 +816,11 @@ export function returnFormPage(
           ${field("退货原因及备注", `<input type="text" name="remark" maxlength="200" placeholder="选填，如：尺码不符 / 包装破损换退">`)}
         </div>
       </div>
-      ${orderItemsBlock(d.products, "sale_price")}
+      ${orderItemsBlock(d.products, "sale_price", {
+        prefillLines: prefill,
+        allowAddRow: false,
+        headHint,
+      })}
       <div class="btn-row">
         <button class="btn primary" type="submit">✅ 确认退货并入库</button>
         <a class="btn secondary" href="/returns">取消</a>
