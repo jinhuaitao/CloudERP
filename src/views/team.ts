@@ -10,7 +10,8 @@ import {
   field,
   type ViewCtx,
 } from "./layout";
-import type { User, SalesOrder, Commission } from "../db";
+import type { User, SalesOrder, Commission, BalanceLog } from "../db";
+import { balanceTypeName } from "../db";
 
 export type TeamNode = User & { children: TeamNode[] };
 
@@ -59,29 +60,35 @@ export function customerListPage(
               </td>
               <td class="num">${u.orderCount} 笔</td>
               <td class="num"><strong>${money(u.total)}</strong></td>
-              <td class="num">${u.credit_limit > 0 ? money(u.credit_limit) : `<span class="muted">不可赊账</span>`}</td>
+              <td class="num">${
+                u.balance > 0
+                  ? `<strong class="pos">${money(u.balance)}</strong>`
+                  : `<span class="muted">¥0.00</span>`
+              }</td>
+              <td class="num" style="white-space:nowrap">${u.credit_limit > 0 ? money(u.credit_limit) : `<span class="muted">不可赊账</span>`}</td>
               <td class="num ${u.debt > 0 ? "neg" : "muted"}"><strong>${u.debt > 0 ? money(u.debt) : "¥0.00"}</strong></td>
-              <td class="muted small">${fmtDT(u.created_at)}</td>
+              <td class="muted small" style="white-space:nowrap">${fmtDT(u.created_at)}</td>
               <td>
-                <div class="btn-row">
-                  <a class="btn small secondary" href="/customers/${u.id}">详情/对账</a>
-                  ${isAdmin ? `<a class="btn small secondary" href="/users/${u.id}/edit">编辑收货/授信</a>` : ""}
+                <div class="btn-row product-actions">
+                  <a class="btn small secondary" href="/customers/${u.id}">详情</a>
+                  <a class="btn small success" href="/customers/${u.id}#balance">💰 充值</a>
+                  ${isAdmin ? `<a class="btn small secondary" href="/users/${u.id}/edit">编辑</a>` : ""}
                 </div>
               </td>
             </tr>`
           )
           .join("")
-      : emptyRow(8, "暂无客户档案");
+      : emptyRow(9, "暂无客户档案");
 
   return `
-    ${pageHead("👥 客户档案与收货对账管理", `共 ${d.total} 位客户 · 集中管理客户收货人、联系电话、配送地址与授信挂账`, isAdmin ? `<a class="btn primary" href="/users/new">＋ 新增客户账号</a>` : "")}
+    ${pageHead("👥 客户档案与收货对账管理", `共 ${d.total} 位客户 · 集中管理客户收货人、联系电话、配送地址、账户余额与授信挂账`, isAdmin ? `<a class="btn primary" href="/users/new">＋ 新增客户账号</a>` : "")}
     <form class="toolbar" method="get" action="/customers">
       <input type="text" name="q" value="${esc(d.q)}" placeholder="🔍 搜索客户名称 / 收货人 / 联系电话 / 收货地址..." maxlength="64" class="grow">
       <button class="btn primary" type="submit">搜索</button>
       ${d.q ? `<a class="btn secondary" href="/customers">重置</a>` : ""}
     </form>
     <div class="card"><div class="table-wrap"><table class="table">
-      <thead><tr><th>客户名称 / 账号</th><th>收货人 / 联系电话 / 默认收货地址</th><th class="num">成交单数</th><th class="num">累计消费额</th><th class="num">授信额度</th><th class="num">当前欠款</th><th>注册时间</th><th>操作</th></tr></thead>
+      <thead><tr><th>客户名称 / 账号</th><th>收货人 / 联系电话 / 默认收货地址</th><th class="num">成交单数</th><th class="num">累计消费额</th><th class="num">账户余额</th><th class="num">授信额度</th><th class="num">当前欠款</th><th>注册时间</th><th>操作</th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>
     ${pagerHtml("/customers", { q: d.q }, d.page, tp(d.total, d.pageSize))}
@@ -96,12 +103,39 @@ export function customerDetailPage(
     user: User;
     stats: { orderCount: number; total: number; paid: number; debt: number };
     orders: SalesOrder[];
+    logs?: BalanceLog[];
   }
 ): string {
   const u = d.user;
   const st = d.stats;
   const isAdmin = ctx.user?.role === "admin";
   const remainCredit = u.credit_limit > 0 ? Math.max(0, u.credit_limit - st.debt) : 0;
+  const balance = Math.max(0, u.balance || 0);
+
+  const balanceRows =
+    d.logs && d.logs.length > 0
+      ? d.logs
+          .map((l) => {
+            const isIn = l.change > 0;
+            const refLink =
+              l.ref_type === "sales" && l.ref_id
+                ? `<a href="/sales/${l.ref_id}">${esc(l.ref_no || "#" + l.ref_id)}</a>`
+                : l.ref_no
+                  ? esc(l.ref_no)
+                  : `<span class="muted">—</span>`;
+            return `<tr>
+              <td class="muted small">${fmtDT(l.created_at)}</td>
+              <td>${badge(balanceTypeName(l.type), isIn ? "green" : "blue")}</td>
+              <td class="num ${isIn ? "pos" : "neg"}"><strong>${isIn ? "+" : "−"}${money(Math.abs(l.change))}</strong></td>
+              <td class="num muted">${money(l.before_balance)}</td>
+              <td class="num"><strong>${money(l.after_balance)}</strong></td>
+              <td class="small">${refLink}</td>
+              <td class="muted small">${esc(l.operator_name || "系统")}</td>
+              <td class="muted small">${esc(l.remark || "—")}</td>
+            </tr>`;
+          })
+          .join("")
+      : emptyRow(8, "该客户暂无余额流水");
 
   const orders =
     d.orders.length > 0
@@ -129,10 +163,11 @@ export function customerDetailPage(
       `${isAdmin ? `<a class="btn secondary" href="/users/${u.id}/edit">⚙️ 编辑收货信息与授信</a>` : ""}
        <a class="btn secondary" href="/customers">← 返回客户列表</a>`
     )}
-    <div class="grid cols-4 mb">
+    <div class="grid cols-5 mb">
       ${statCard("🧾", "有效订单总数", `${st.orderCount} 笔`, "历史累计成交", "blue")}
       ${statCard("💰", "累计消费总额", money(st.total), "折后应收总计", "green")}
       ${statCard("✅", "累计已回款", money(st.paid), "实收总金额", "yellow")}
+      ${statCard("💳", "账户可用余额", money(balance), "可用于余额支付抵扣货款", balance > 0 ? "green" : "blue")}
       ${statCard("⚠️", "当前挂账欠款", money(st.debt), u.credit_limit > 0 ? `授信额度 ${money(u.credit_limit)} · 剩余可用 ${money(remainCredit)}` : "未开通赊账额度", st.debt > 0 ? "red" : "green")}
     </div>
     <div class="card"><h3>📍 客户收货与联系资料 ${u.status === "active" ? badge("正常", "green") : badge("已禁用", "gray")}</h3>
@@ -145,6 +180,28 @@ export function customerDetailPage(
         <div><dt>电子邮箱</dt><dd>${esc(u.email || "—")}</dd></div>
         <div><dt>注册建档时间</dt><dd>${fmtDT(u.created_at)}</dd></div>
       </dl>
+    </div>
+    <div class="card highlight-card" id="balance"><h3>💳 客户余额账户（当前可用：${money(balance)}）</h3>
+      <p class="muted small mb">余额可用于「余额支付」抵扣货款，也可在欠款补收时选择余额结算。每次充值、消费、作废退回都会生成流水，可逐笔对账。</p>
+      <form method="post" action="/customers/${u.id}/balance">
+        ${csrfInput(ctx.csrf)}
+        <div class="form-row cols-3">
+          ${field(
+            "充值 / 扣减金额（元）",
+            `<input type="number" name="amount" step="0.01" min="${isAdmin ? "-999999" : "0.01"}" value="" placeholder="正数充值，负数扣减（仅管理员）" required>`,
+            isAdmin ? "正数为充值，负数为扣减；扣减后余额不能小于 0" : "销售员仅可为客户充值，扣减请由管理员操作",
+            true
+          )}
+          ${field("备注说明", `<input type="text" name="remark" maxlength="200" placeholder="选填，如：微信转账充值 / 现金预存 / 冲正">`, "")}
+          <div class="field"><label>&nbsp;</label><button class="btn success" type="submit">💰 确认入账</button></div>
+        </div>
+      </form>
+      <hr class="divider">
+      <h3>📜 余额流水（最近 20 笔）</h3>
+      <div class="table-wrap"><table class="table">
+        <thead><tr><th>时间</th><th>类型</th><th class="num">变动金额</th><th class="num">变动前</th><th class="num">变动后</th><th>关联单据</th><th>经办人</th><th>备注</th></tr></thead>
+        <tbody>${balanceRows}</tbody>
+      </table></div>
     </div>
     <div class="card"><h3>🧾 客户历史订单明细（含每单收货快照，点击未结清订单可登记补收款）</h3>
       <div class="table-wrap"><table class="table">

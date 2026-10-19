@@ -276,12 +276,13 @@ export function registerStock(app: Hono<AppEnv>) {
         });
       }
       const ctx = pageCtx(c);
+      const customerBalance = o.customer_id ? await s.getBalance(o.customer_id) : undefined;
       return c.html(
         layout({
           title: `销售单 ${o.order_no}`,
           ctx,
           active: "sales",
-          content: salesDetailPage(ctx, o, me.role === "admin"),
+          content: salesDetailPage(ctx, o, me.role === "admin", customerBalance),
         })
       );
     } catch (e) {
@@ -306,7 +307,7 @@ export function registerStock(app: Hono<AppEnv>) {
       const { fields } = await parseForm(c);
       const amount = parseFloat(fields.amount || "") || 0;
       const payment = (fields.payment || "").trim() || undefined;
-      const updated = await s.paySalesOrderDebt(id, amount, payment);
+      const updated = await s.paySalesOrderDebt(id, amount, payment, me.id);
       await s.audit(
         me.id,
         "收款核销",

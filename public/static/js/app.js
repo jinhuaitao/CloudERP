@@ -124,6 +124,8 @@
           "商家暂未上传" + (val === "alipay" ? "支付宝" : "微信") + "收款码，请更换结算方式或联系客服确认。";
       } else if (val === "bank") {
         emptyEl.textContent = "商家暂未填写银行转账收款信息，请更换结算方式或联系客服确认。";
+      } else if (val === "balance") {
+        emptyEl.textContent = "「余额支付」将从客户账户余额中直接扣减，无需扫码。";
       } else {
         emptyEl.textContent = "「" + label + "」无需扫码支付，按约定结算即可。";
       }
@@ -175,6 +177,8 @@
     var paidInput = document.getElementById("paidInput");
     var fillFullPaidBtn = document.getElementById("fillFullPaidBtn");
     var customerSelect = document.getElementById("customerSelect");
+    var paySel = document.getElementById("paymentSelect");
+    var balanceHint = document.getElementById("balanceHint");
     var shipNameInput = document.getElementById("shippingNameInput");
     var shipPhoneInput = document.getElementById("shippingPhoneInput");
     var shipAddrInput = document.getElementById("shippingAddressInput");
@@ -189,6 +193,79 @@
         if (shipNameInput) shipNameInput.value = opt.getAttribute("data-shipping-name") || "";
         if (shipPhoneInput) shipPhoneInput.value = opt.getAttribute("data-phone") || "";
         if (shipAddrInput) shipAddrInput.value = opt.getAttribute("data-address") || "";
+        syncBalanceOption();
+        recalc();
+      });
+    }
+
+    function fmt2(n) {
+      return (Math.round((parseFloat(n) || 0) * 100) / 100).toFixed(2);
+    }
+
+    /** 当前可用余额：员工开单取所选客户的 data-balance，客户自助下单取服务端下发的余额 */
+    function currentBalance() {
+      if (customerSelect) {
+        var opt = customerSelect.selectedOptions[0];
+        return opt ? parseFloat(opt.getAttribute("data-balance") || "0") || 0 : 0;
+      }
+      return balanceHint ? parseFloat(balanceHint.getAttribute("data-balance") || "0") || 0 : 0;
+    }
+
+    /** 刷新「余额支付」选项文案里的可用余额 */
+    function syncBalanceOption() {
+      if (!paySel) return;
+      var opt = paySel.querySelector('option[value="balance"]');
+      if (!opt) return;
+      if (customerSelect) {
+        var o = customerSelect.selectedOptions[0];
+        opt.textContent = o && customerSelect.value ? "余额支付（客户可用 ¥" + fmt2(currentBalance()) + "）" : "余额支付（扣客户余额）";
+      }
+    }
+
+    /** 余额支付提示条 + 锁定实收金额 */
+    function syncBalance() {
+      if (!paySel) return;
+      var isBalance = paySel.value === "balance";
+      if (paidInput) {
+        if (isBalance) {
+          userEditedPaid = false;
+          paidInput.value = currentReceivable.toFixed(2);
+          paidInput.readOnly = true;
+          paidInput.title = "余额支付按应收全额扣减，实收金额自动锁定";
+        } else {
+          paidInput.readOnly = false;
+          paidInput.removeAttribute("title");
+        }
+      }
+      if (!balanceHint) return;
+      if (!isBalance) {
+        balanceHint.hidden = true;
+        return;
+      }
+      balanceHint.hidden = false;
+      if (customerSelect && !customerSelect.value) {
+        balanceHint.innerHTML =
+          '<span class="neg">余额支付需先在「客户选择」中选择已建档客户，散客（不记名）没有余额账户。</span>';
+        return;
+      }
+      var bal = currentBalance();
+      var need = currentReceivable;
+      var who = customerSelect ? "客户当前可用余额" : "当前可用余额";
+      if (bal < need) {
+        balanceHint.innerHTML =
+          who + " <strong>¥" + fmt2(bal) + "</strong>，本单需支付 <strong>¥" + fmt2(need) + "</strong>，" +
+          '<span class="neg">余额不足 ¥' + fmt2(need - bal) + "，请先为客户充值或更换结算方式。</span>";
+      } else {
+        balanceHint.innerHTML =
+          who + " <strong>¥" + fmt2(bal) + "</strong>，本单将扣减 <strong>¥" + fmt2(need) +
+          "</strong>，扣后余额 <strong>¥" + fmt2(bal - need) + "</strong>。";
+      }
+    }
+
+    if (paySel) {
+      paySel.addEventListener("change", function () {
+        if (paySel.value === "balance") userEditedPaid = false;
+        recalc();
       });
     }
 
@@ -223,7 +300,7 @@
       });
       var discount = discountInput ? Math.max(0, parseFloat(discountInput.value) || 0) : 0;
       currentReceivable = Math.max(0, Math.round((subtotal - discount) * 100) / 100);
-      if (paidInput && !userEditedPaid && discountInput) {
+      if (paidInput && !userEditedPaid && (discountInput || (paySel && paySel.value === "balance"))) {
         paidInput.value = currentReceivable.toFixed(2);
       }
       if (totalEl) {
@@ -239,6 +316,7 @@
           totalEl.innerHTML = "单据合计：<span>¥" + subtotal.toFixed(2) + "</span>";
         }
       }
+      syncBalance();
     }
 
     function bindRow(row) {
@@ -304,6 +382,7 @@
         recalc();
       });
     });
+    syncBalanceOption();
     recalc();
   }
 

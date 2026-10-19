@@ -54,7 +54,7 @@ export function paymentQrWidget(
       ? "alipay"
       : activeMethod === "bank"
         ? "bank"
-        : activeMethod === "cash" || activeMethod === "credit"
+        : activeMethod === "cash" || activeMethod === "credit" || activeMethod === "balance"
           ? "none"
           : "wechat";
   const activeExists = active === "wechat" ? !!wechatUrl : active === "alipay" ? !!alipayUrl : active === "bank" ? hasBank : false;
@@ -74,7 +74,9 @@ export function paymentQrWidget(
     : active === "bank"
       ? "商家暂未填写银行转账收款信息，请更换结算方式或联系客服确认。"
       : active === "none"
-        ? `「${paymentName(activeMethod || "cash")}」无需扫码支付，按约定结算即可。`
+        ? activeMethod === "balance"
+          ? "「余额支付」将从客户账户余额中直接扣减，无需扫码。"
+          : `「${paymentName(activeMethod || "cash")}」无需扫码支付，按约定结算即可。`
         : `商家暂未上传${active === "alipay" ? "支付宝" : "微信"}收款码，请更换结算方式或联系客服确认。`;
 
   return `<div class="payqr-panel" id="paymentQrBox" data-active-method="${active}">
@@ -494,17 +496,19 @@ export function salesFormPage(ctx: ViewCtx, d: SalesFormData): string {
     ? ""
     : field(
         "客户选择（选中后自动带出该客户的默认收货信息）",
-        `<select name="customer_id" id="customerSelect"><option value="" data-shipping-name="" data-phone="" data-address="">— 零售散客（不记名）—</option>${d.customers
+        `<select name="customer_id" id="customerSelect"><option value="" data-shipping-name="" data-phone="" data-address="" data-balance="0">— 零售散客（不记名）—</option>${d.customers
           .map(
             (u) =>
-              `<option value="${u.id}" data-credit="${u.credit_limit}" data-shipping-name="${esc(
+              `<option value="${u.id}" data-credit="${u.credit_limit}" data-balance="${round2(u.balance || 0)}" data-shipping-name="${esc(
                 u.shipping_name || u.nickname
               )}" data-phone="${esc(u.phone)}" data-address="${esc(u.address)}">${esc(u.nickname)}（@${esc(
                 u.username
-              )}${u.phone ? ` · ${esc(u.phone)}` : ""}${u.credit_limit > 0 ? ` · 授信 ¥${u.credit_limit}` : ""}）</option>`
+              )}${u.phone ? ` · ${esc(u.phone)}` : ""}${u.credit_limit > 0 ? ` · 授信 ¥${u.credit_limit}` : ""}${
+                u.balance > 0 ? ` · 余额 ¥${round2(u.balance)}` : ""
+              }）</option>`
           )
           .join("")}</select>`,
-        "关联客户可统计累计消费、自动填入收货地址并校验赊账授信额度"
+        "关联客户可统计累计消费、自动填入收货地址并校验赊账授信额度；选择「余额支付」将全额扣减该客户余额"
       );
 
   const salesField = isCustomer
@@ -528,8 +532,14 @@ export function salesFormPage(ctx: ViewCtx, d: SalesFormData): string {
           "选择后将按二级分销规则自动生成销售提成与上级津贴"
         );
 
-  const payOptions = ["wechat", "alipay", "cash", "bank", "credit"]
-    .map((k) => `<option value="${k}">${esc(paymentName(k))}</option>`)
+  // 结算方式：余额支付按客户可用余额展示，选中客户后由 app.js 实时刷新
+  const myBalance = round2(cp?.balance ?? ctx.user?.balance ?? 0);
+  const payOptions = ["wechat", "alipay", "cash", "bank", "balance", "credit"]
+    .map((k) => {
+      if (k !== "balance") return `<option value="${k}">${esc(paymentName(k))}</option>`;
+      const label = isCustomer ? `余额支付（可用 ¥${myBalance.toFixed(2)}）` : "余额支付（扣客户余额）";
+      return `<option value="${k}" data-balance-opt="1">${esc(label)}</option>`;
+    })
     .join("");
 
   const cartHint = cartCount
@@ -576,6 +586,7 @@ export function salesFormPage(ctx: ViewCtx, d: SalesFormData): string {
                 )}
                 ${field("意向结算方式", `<select name="payment" id="paymentSelect">${payOptions}</select>`)}
               </div>
+              <div class="items-hint" id="balanceHint" data-balance="${myBalance}" hidden></div>
               <div class="form-row">
                 ${field(
                   "详细收货地址",
@@ -604,6 +615,7 @@ export function salesFormPage(ctx: ViewCtx, d: SalesFormData): string {
                 ${field("收款方式", `<select name="payment" id="paymentSelect">${payOptions}</select>`)}
                 ${field("单据备注", `<input type="text" name="remark" maxlength="200" placeholder="选填，发货或收款说明">`)}
               </div>
+              <div class="items-hint" id="balanceHint" hidden></div>
               <div class="form-row cols-3">
                 ${field("收货人姓名", `<input type="text" id="shippingNameInput" name="shipping_name" maxlength="32" placeholder="选择客户后自动带出，或手动填写">`)}
                 ${field("收货联系电话", `<input type="tel" id="shippingPhoneInput" name="shipping_phone" maxlength="20" placeholder="选择客户后自动带出">`)}
@@ -630,7 +642,12 @@ export function salesFormPage(ctx: ViewCtx, d: SalesFormData): string {
     </form>`;
 }
 
-export function salesDetailPage(ctx: ViewCtx, o: SalesOrder, canVoid: boolean): string {
+export function salesDetailPage(
+  ctx: ViewCtx,
+  o: SalesOrder,
+  canVoid: boolean,
+  customerBalance?: number
+): string {
   const isAdmin = ctx.user?.role === "admin";
   const canCollectDebt = ctx.user?.role === "admin" || (ctx.user?.role === "sales" && o.sales_id === ctx.user.id);
   const items = (o.items || [])
@@ -649,8 +666,15 @@ export function salesDetailPage(ctx: ViewCtx, o: SalesOrder, canVoid: boolean): 
     .join("");
   const debt = round2(o.total - o.paid);
   // 默认选中订单原结算方式，使下方收款码与下拉框初始状态一致
-  const payOptions = ["wechat", "alipay", "cash", "bank"]
-    .map((k) => `<option value="${k}"${o.payment === k ? " selected" : ""}>${esc(paymentName(k))}</option>`)
+  const payMethods = ["wechat", "alipay", "cash", "bank"];
+  // 仅关联了客户的订单才能用余额补收
+  if (o.customer_id && customerBalance !== undefined) payMethods.push("balance");
+  const payOptions = payMethods
+    .map((k) => {
+      const label =
+        k === "balance" ? `余额支付（可用 ¥${round2(customerBalance || 0).toFixed(2)}）` : paymentName(k);
+      return `<option value="${k}"${o.payment === k ? " selected" : ""}>${esc(label)}</option>`;
+    })
     .join("");
 
   const debtCard =

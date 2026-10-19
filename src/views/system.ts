@@ -11,7 +11,8 @@ import {
   roleName,
   type ViewCtx,
 } from "./layout";
-import type { User } from "../db";
+import type { User, BalanceLog } from "../db";
+import { balanceTypeName } from "../db";
 import { fileUrl } from "./products";
 
 function tp(total: number, pageSize: number): number {
@@ -267,7 +268,14 @@ export interface SessionInfo {
 
 export function profilePage(
   ctx: ViewCtx,
-  d: { user: User; sessions: SessionInfo[]; currentDigest: string; hasSecQ: boolean; onboarding?: boolean }
+  d: {
+    user: User;
+    sessions: SessionInfo[];
+    currentDigest: string;
+    hasSecQ: boolean;
+    onboarding?: boolean;
+    balanceLogs?: BalanceLog[];
+  }
 ): string {
   const u = d.user;
   const isCustomer = u.role === "customer";
@@ -319,8 +327,43 @@ export function profilePage(
       </div>`
     : "";
 
-  const shippingCard = `
-    <div class="card highlight-card" id="shipping">
+  // 客户余额卡：可用余额 + 最近流水（充值由商家在客户档案中操作）
+  const myBalance = Math.max(0, u.balance || 0);
+  const myLogs = d.balanceLogs || [];
+  const balanceLogRows =
+    myLogs.length > 0
+      ? myLogs
+          .map((l) => {
+            const isIn = l.change > 0;
+            return `<tr>
+              <td class="muted small">${fmtDT(l.created_at)}</td>
+              <td>${badge(balanceTypeName(l.type), isIn ? "green" : "blue")}</td>
+              <td class="num ${isIn ? "pos" : "neg"}"><strong>${isIn ? "+" : "−"}${money(Math.abs(l.change))}</strong></td>
+              <td class="num"><strong>${money(l.after_balance)}</strong></td>
+              <td class="muted small">${esc(l.remark || "—")}</td>
+            </tr>`;
+          })
+          .join("")
+      : emptyRow(5, "暂无余额变动记录");
+
+  const balanceCard = isCustomer
+    ? `<div class="card highlight-card" id="balance">
+        <div class="card-head">
+          <h3>💳 我的账户余额</h3>
+          ${badge(myBalance > 0 ? "可用于余额支付" : "暂无余额", myBalance > 0 ? "green" : "gray")}
+        </div>
+        <div class="balance-hero">
+          <div class="balance-amount">${money(myBalance)}</div>
+          <p class="muted small">下单结算时选择「余额支付」即可直接抵扣货款；余额不足时请更换结算方式，或联系商家充值。</p>
+        </div>
+        <div class="table-wrap"><table class="table">
+          <thead><tr><th>时间</th><th>类型</th><th class="num">变动金额</th><th class="num">变动后余额</th><th>备注</th></tr></thead>
+          <tbody>${balanceLogRows}</tbody>
+        </table></div>
+      </div>`
+    : "";
+
+  const shippingCard = `    <div class="card highlight-card" id="shipping">
       <div class="card-head">
         <h3>📍 默认收货信息设置（收货人 / 联系电话 / 收货地址）</h3>
         ${
@@ -386,6 +429,7 @@ export function profilePage(
       isCustomer ? `<a class="btn primary" href="/shop">🛒 我要下单</a>` : ""
     )}
     ${customerBanner}
+    ${balanceCard}
     ${shippingCard}
     <div class="grid cols-2">
       <div class="card"><h3>📝 账号基础资料</h3>

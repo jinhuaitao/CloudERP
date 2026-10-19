@@ -12,7 +12,7 @@ import {
   commissionPage,
 } from "../views/team";
 import { store, pageCtx, needRoles, parseForm, redirectWith } from "./helpers";
-import { getPagination, clientIP, hashPassword, validateUsername, validatePassword, todayUTC8, utc8Range } from "../lib";
+import { getPagination, clientIP, hashPassword, validateUsername, validatePassword, todayUTC8, utc8Range, round2 } from "../lib";
 
 type TeamNode = User & { children: TeamNode[] };
 
@@ -84,9 +84,10 @@ export function registerTeam(app: Hono<AppEnv>) {
       const id = parseInt(c.req.param("id") || "", 10) || 0;
       const u = id ? await s.getUserById(id) : null;
       if (!u || u.role !== "customer") return notFound(c);
-      const [stats, ordersRes] = await Promise.all([
+      const [stats, ordersRes, logsRes] = await Promise.all([
         s.customerStats(id),
         s.listSalesOrders({ customerId: id, page: 1, pageSize: 20 }),
+        s.listBalanceLogs({ userId: id, page: 1, pageSize: 20 }),
       ]);
       const ctx = pageCtx(c);
       return c.html(
@@ -94,13 +95,54 @@ export function registerTeam(app: Hono<AppEnv>) {
           title: `客户 ${u.nickname || u.username}`,
           ctx,
           active: "customers",
-          content: customerDetailPage(ctx, { user: u, stats, orders: ordersRes.rows }),
+          content: customerDetailPage(ctx, { user: u, stats, orders: ordersRes.rows, logs: logsRes.rows }),
         })
       );
     } catch (e) {
       if (e instanceof HTTPException) throw e;
       const ctx = pageCtx(c);
       return c.html(errorPage(ctx, 500, "出错了", "加载客户详情失败：" + (e as Error).message), 500);
+    }
+  });
+
+  // ---------- 客户余额充值 / 扣减 ----------
+  app.post("/customers/:id/balance", async (c) => {
+    const me = needRoles(c, ["admin", "sales"]);
+    const s = store(c);
+    const id = parseInt(c.req.param("id") || "", 10) || 0;
+    try {
+      const u = id ? await s.getUserById(id) : null;
+      if (!u || u.role !== "customer") return notFound(c);
+      const { fields } = await parseForm(c);
+      const amount = round2(parseFloat(fields.amount || "") || 0);
+      if (!amount) return redirectWith(c, `/customers/${id}`, undefined, "请输入不为 0 的充值 / 扣减金额");
+      if (amount < 0 && me.role !== "admin") {
+        return redirectWith(c, `/customers/${id}`, undefined, "仅管理员可执行余额扣减，销售员只能为客户充值");
+      }
+      const remark = (fields.remark || "").trim() || (amount > 0 ? "余额充值" : "余额扣减");
+      const r = await s.adjustBalance({
+        user_id: id,
+        change: amount,
+        type: amount > 0 ? "recharge" : "adjust",
+        ref_type: "manual",
+        operator_id: me.id,
+        remark,
+      });
+      await s.audit(
+        me.id,
+        amount > 0 ? "客户充值" : "客户余额扣减",
+        "客户",
+        `${u.nickname || u.username} 余额 ${amount > 0 ? "+" : ""}${amount}（¥${r.before.toFixed(2)} → ¥${r.after.toFixed(2)}）`,
+        clientIP(c)
+      );
+      return redirectWith(
+        c,
+        `/customers/${id}`,
+        `已${amount > 0 ? "充值" : "扣减"} ¥${Math.abs(amount).toFixed(2)}，客户当前余额 ¥${r.after.toFixed(2)}`
+      );
+    } catch (e) {
+      if (e instanceof HTTPException) throw e;
+      return redirectWith(c, `/customers/${id}`, undefined, "操作失败：" + (e as Error).message);
     }
   });
 

@@ -22,22 +22,38 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       for (let i = 0; i < stmts.length; i += 20) {
         await db.batch(stmts.slice(i, i + 20));
       }
-    } else {
-      // 存量数据库平滑自愈：确保收货人、联系电话、收货地址字段存在
-      const alterCols = [
-        "ALTER TABLE users ADD COLUMN shipping_name TEXT NOT NULL DEFAULT ''",
-        "ALTER TABLE users ADD COLUMN address TEXT NOT NULL DEFAULT ''",
-        "ALTER TABLE sales_orders ADD COLUMN shipping_name TEXT NOT NULL DEFAULT ''",
-        "ALTER TABLE sales_orders ADD COLUMN shipping_phone TEXT NOT NULL DEFAULT ''",
-        "ALTER TABLE sales_orders ADD COLUMN shipping_address TEXT NOT NULL DEFAULT ''",
-        "INSERT OR IGNORE INTO settings (key, value) VALUES ('wechat_qr_key', ''), ('alipay_qr_key', ''), ('payment_note', '')",
-      ];
-      for (const sql of alterCols) {
-        try {
-          await db.prepare(sql).run();
-        } catch {
-          /* 字段已存在时忽略 */
-        }
+    }
+    // 幂等升级：空库自建、存量库补字段、以及未跑迁移文件的环境都靠这里兜底
+    const upgradeSql = [
+      "ALTER TABLE users ADD COLUMN shipping_name TEXT NOT NULL DEFAULT ''",
+      "ALTER TABLE users ADD COLUMN address TEXT NOT NULL DEFAULT ''",
+      "ALTER TABLE users ADD COLUMN balance REAL NOT NULL DEFAULT 0",
+      "ALTER TABLE sales_orders ADD COLUMN shipping_name TEXT NOT NULL DEFAULT ''",
+      "ALTER TABLE sales_orders ADD COLUMN shipping_phone TEXT NOT NULL DEFAULT ''",
+      "ALTER TABLE sales_orders ADD COLUMN shipping_address TEXT NOT NULL DEFAULT ''",
+      `CREATE TABLE IF NOT EXISTS balance_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        change REAL NOT NULL,
+        before_balance REAL NOT NULL,
+        after_balance REAL NOT NULL,
+        type TEXT NOT NULL DEFAULT 'adjust',
+        ref_type TEXT NOT NULL DEFAULT '',
+        ref_id INTEGER,
+        ref_no TEXT NOT NULL DEFAULT '',
+        operator_id INTEGER,
+        remark TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+      )`,
+      "CREATE INDEX IF NOT EXISTS idx_balance_logs_user ON balance_logs(user_id, id)",
+      "CREATE INDEX IF NOT EXISTS idx_balance_logs_ref ON balance_logs(ref_type, ref_id)",
+      "INSERT OR IGNORE INTO settings (k, v) VALUES ('wechat_qr_key', ''), ('alipay_qr_key', ''), ('payment_note', '')",
+    ];
+    for (const sql of upgradeSql) {
+      try {
+        await db.prepare(sql).run();
+      } catch {
+        /* 字段/索引已存在时忽略 */
       }
     }
     schemaReady = true;
@@ -63,6 +79,8 @@ export interface User {
   sales_level: number;
   commission_rate: number;
   credit_limit: number;
+  /** 客户可用余额（元），仅 customer 使用 */
+  balance: number;
   created_at: string;
 }
 export interface Category {
@@ -238,10 +256,39 @@ const PAYMENT_NAME: Record<string, string> = {
   wechat: "微信支付",
   alipay: "支付宝",
   bank: "银行转账",
+  balance: "余额支付",
   credit: "挂账/赊销",
 };
 export function paymentName(p: string): string {
   return PAYMENT_NAME[p] || p;
+}
+
+/** 余额流水类型中文名 */
+const BALANCE_TYPE_NAME: Record<string, string> = {
+  recharge: "充值",
+  consume: "消费",
+  refund: "退款",
+  void: "作废退回",
+  adjust: "手工调整",
+};
+export function balanceTypeName(t: string): string {
+  return BALANCE_TYPE_NAME[t] || t;
+}
+
+export interface BalanceLog {
+  id: number;
+  user_id: number;
+  change: number;
+  before_balance: number;
+  after_balance: number;
+  type: string;
+  ref_type: string;
+  ref_id: number | null;
+  ref_no: string;
+  operator_id: number | null;
+  operator_name?: string;
+  remark: string;
+  created_at: string;
 }
 
 export class Store {
@@ -392,6 +439,101 @@ export class Store {
       (await this.db.prepare("SELECT * FROM users WHERE role='sales' AND status='active' ORDER BY sales_level, id").all<User>())
         .results || []
     );
+  }
+
+  // ============ 客户余额账户 ============
+  async getBalance(userId: number): Promise<number> {
+    const r = await this.db.prepare("SELECT balance FROM users WHERE id=?").bind(userId).first<{ balance: number }>();
+    return round2(r?.balance || 0);
+  }
+
+  /**
+   * 余额变动唯一入口（充值 / 手工调整 / 欠款补收等非批量场景）。
+   * change 正数入账、负数出账；出账用「条件 UPDATE」原子扣减，禁止透支。
+   */
+  async adjustBalance(o: {
+    user_id: number;
+    change: number;
+    type: "recharge" | "consume" | "refund" | "void" | "adjust";
+    ref_type?: string;
+    ref_id?: number | null;
+    ref_no?: string;
+    operator_id?: number | null;
+    remark?: string;
+  }): Promise<{ before: number; after: number }> {
+    const change = round2(o.change);
+    if (!change) throw new Error("余额变动金额不能为 0");
+    const u = await this.getUserById(o.user_id);
+    if (!u) throw new Error("客户不存在");
+    if (u.role !== "customer") throw new Error("仅客户账号可开通余额账户");
+
+    // 原子扣减：余额不足时 UPDATE 影响 0 行，避免「先读后写」被并发覆盖成负数
+    const r = await this.db
+      .prepare("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id=? AND ROUND(balance + ?, 2) >= 0")
+      .bind(change, o.user_id, change)
+      .run();
+    if (!r.meta.changes) {
+      const cur = await this.getBalance(o.user_id);
+      throw new Error(
+        `客户「${u.nickname || u.username}」余额不足：当前可用余额 ¥${cur.toFixed(2)}，本次需扣减 ¥${Math.abs(change).toFixed(2)}`
+      );
+    }
+    const after = await this.getBalance(o.user_id);
+    const before = round2(after - change);
+    await this.db
+      .prepare(
+        `INSERT INTO balance_logs (user_id,change,before_balance,after_balance,type,ref_type,ref_id,ref_no,operator_id,remark)
+         VALUES (?,?,?,?,?,?,?,?,?,?)`
+      )
+      .bind(
+        o.user_id,
+        change,
+        before,
+        after,
+        o.type,
+        o.ref_type || "manual",
+        o.ref_id ?? null,
+        o.ref_no || "",
+        o.operator_id ?? null,
+        o.remark || ""
+      )
+      .run();
+    return { before, after };
+  }
+
+  async listBalanceLogs(o: {
+    userId: number;
+    page: number;
+    pageSize: number;
+  }): Promise<{ rows: BalanceLog[]; total: number }> {
+    const total =
+      (
+        await this.db
+          .prepare("SELECT COUNT(*) AS c FROM balance_logs WHERE user_id=?")
+          .bind(o.userId)
+          .first<{ c: number }>()
+      )?.c || 0;
+    const rows =
+      (
+        await this.db
+          .prepare(
+            `SELECT bl.*, op.nickname AS operator_name FROM balance_logs bl
+             LEFT JOIN users op ON op.id=bl.operator_id
+             WHERE bl.user_id=? ORDER BY bl.id DESC LIMIT ? OFFSET ?`
+          )
+          .bind(o.userId, o.pageSize, (o.page - 1) * o.pageSize)
+          .all<BalanceLog>()
+      ).results || [];
+    return { rows, total };
+  }
+
+  /** 某张销售单累计从客户余额扣走的净额（作废时据此退回，重复作废为 0） */
+  async salesBalanceNet(salesOrderId: number): Promise<number> {
+    const r = await this.db
+      .prepare("SELECT COALESCE(SUM(change),0) AS s FROM balance_logs WHERE ref_type='sales' AND ref_id=?")
+      .bind(salesOrderId)
+      .first<{ s: number }>();
+    return round2(-(r?.s || 0));
   }
 
   // ============ 密保问题 ============
@@ -988,11 +1130,30 @@ export class Store {
     }
     const total = round2(Math.max(0, subtotal - discount));
     const profit = round2(rawProfit - discount);
-    const paid = round2(Math.max(0, o.paid ?? 0));
+    const payment = (o.payment || "cash").trim() || "cash";
+    let paid = round2(Math.max(0, o.paid ?? 0));
     if (paid > total) {
       throw new Error(`实收金额（¥${paid}）不能超过应收总额（¥${total}）`);
     }
-    const orderDebt = round2(total - paid);
+    let orderDebt = round2(total - paid);
+
+    // 余额支付：仅限已建档客户，按应收全额扣减余额（不允许部分余额 + 部分挂账，避免账目混乱）
+    let balanceBefore = 0;
+    let balanceDeduct = 0;
+    if (payment === "balance") {
+      if (!o.customer_id) throw new Error("余额支付需先选择客户，散客（不记名）没有余额账户");
+      const bu = await this.getUserById(o.customer_id);
+      if (!bu || bu.role !== "customer") throw new Error("余额支付需先选择客户，散客（不记名）没有余额账户");
+      balanceBefore = round2(bu.balance || 0);
+      if (balanceBefore < total) {
+        throw new Error(
+          `客户「${bu.nickname || bu.username}」余额不足：当前可用余额 ¥${balanceBefore.toFixed(2)}，本单需支付 ¥${total.toFixed(2)}，请先充值或更换结算方式`
+        );
+      }
+      balanceDeduct = total;
+      paid = total;
+      orderDebt = 0;
+    }
 
     // 读取关联客户信息：校验授信额度 + 自动补全/回写默认收货信息
     let shipName = (o.shipping_name || "").trim();
@@ -1039,7 +1200,7 @@ export class Store {
         total,
         discount,
         paid,
-        o.payment || "cash",
+        payment,
         shipName,
         shipPhone,
         shipAddr,
@@ -1048,6 +1209,29 @@ export class Store {
       .run();
     const orderId = Number(r.meta.last_row_id);
     const stmts: D1PreparedStatement[] = [];
+
+    // 余额支付：与订单、库存、佣金同批提交，保证「扣款成功 ⇔ 订单成立」
+    if (balanceDeduct > 0 && o.customer_id) {
+      const afterBalance = round2(balanceBefore - balanceDeduct);
+      stmts.push(this.db.prepare("UPDATE users SET balance=? WHERE id=?").bind(afterBalance, o.customer_id));
+      stmts.push(
+        this.db
+          .prepare(
+            `INSERT INTO balance_logs (user_id,change,before_balance,after_balance,type,ref_type,ref_id,ref_no,operator_id,remark)
+             VALUES (?,?,?,?, 'consume','sales',?,?,?,?)`
+          )
+          .bind(
+            o.customer_id,
+            -balanceDeduct,
+            balanceBefore,
+            afterBalance,
+            orderId,
+            order_no,
+            o.operator_id,
+            `余额支付销售单 ${order_no}`
+          )
+      );
+    }
 
     const runStock = new Map<number, number>();
     for (const [id, p] of prods) runStock.set(id, p.stock);
@@ -1118,8 +1302,8 @@ export class Store {
     return order_no;
   }
 
-  /** 销售单欠款补收/核销 */
-  async paySalesOrderDebt(id: number, amount: number, payment?: string): Promise<SalesOrder> {
+  /** 销售单欠款补收/核销（支持现金 / 微信 / 支付宝 / 银行 / 余额） */
+  async paySalesOrderDebt(id: number, amount: number, payment?: string, operatorId?: number): Promise<SalesOrder> {
     const o = await this.getSalesOrder(id);
     if (!o || o.status !== "done") throw new Error("该销售单不存在或已作废");
     const debt = round2(o.total - o.paid);
@@ -1130,6 +1314,20 @@ export class Store {
     }
     const newPaid = round2(o.paid + payAmt);
     const newPayment = payment && payment !== "credit" ? payment : o.payment === "credit" && newPaid >= o.total ? "cash" : o.payment;
+    // 余额补收：先从客户余额扣款，扣款失败则不落账（余额不足会直接抛错）
+    if (newPayment === "balance") {
+      if (!o.customer_id) throw new Error("该销售单未关联客户，无法使用余额支付");
+      await this.adjustBalance({
+        user_id: o.customer_id,
+        change: -payAmt,
+        type: "consume",
+        ref_type: "sales",
+        ref_id: id,
+        ref_no: o.order_no,
+        operator_id: operatorId ?? null,
+        remark: `欠款补收（余额支付）${o.order_no}`,
+      });
+    }
     await this.db
       .prepare("UPDATE sales_orders SET paid=?, payment=? WHERE id=?")
       .bind(newPaid, newPayment, id)
@@ -1242,6 +1440,33 @@ export class Store {
           )
           .bind(it.product_id, round2(it.qty), beforeQty, afterQty, id, operatorId, `作废销售单 ${o.order_no}`)
       );
+    }
+    // 作废时把该单已从客户余额扣走的金额原路退回（含后续余额补收的部分）
+    const usedBalance = await this.salesBalanceNet(id);
+    if (usedBalance > 0 && o.customer_id) {
+      const cu = await this.getUserById(o.customer_id);
+      if (cu) {
+        const before = round2(cu.balance || 0);
+        const after = round2(before + usedBalance);
+        stmts.push(this.db.prepare("UPDATE users SET balance=? WHERE id=?").bind(after, o.customer_id));
+        stmts.push(
+          this.db
+            .prepare(
+              `INSERT INTO balance_logs (user_id,change,before_balance,after_balance,type,ref_type,ref_id,ref_no,operator_id,remark)
+               VALUES (?,?,?,?, 'void','sales',?,?,?,?)`
+            )
+            .bind(
+              o.customer_id,
+              usedBalance,
+              before,
+              after,
+              id,
+              o.order_no,
+              operatorId,
+              `作废销售单 ${o.order_no}，余额原路退回`
+            )
+        );
+      }
     }
     await this.db.batch(stmts);
   }

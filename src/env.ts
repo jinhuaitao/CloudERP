@@ -19,6 +19,8 @@ export interface SafeUser {
   sales_level: number;
   parent_id: number | null;
   avatar_key: string;
+  /** 客户可用余额（元），仅 customer 有实际意义 */
+  balance: number;
 }
 
 export type AppEnv = {
@@ -39,6 +41,7 @@ export function toSafeUser(u: {
   sales_level: number;
   parent_id: number | null;
   avatar_key: string;
+  balance?: number;
 }): SafeUser {
   return {
     id: u.id,
@@ -48,5 +51,6 @@ export function toSafeUser(u: {
     sales_level: u.sales_level,
     parent_id: u.parent_id,
     avatar_key: u.avatar_key,
+    balance: u.balance || 0,
   };
 }

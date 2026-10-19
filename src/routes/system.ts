@@ -450,9 +450,12 @@ export function registerSystem(app: Hono<AppEnv>) {
       const full = await s.getUserById(u.id);
       if (!full) throw new HTTPException(302, { res: c.redirect("/login", 302) });
       const sid = sidFromCookie(c);
-      const [sessions, secq] = await Promise.all([
+      const [sessions, secq, balanceLogs] = await Promise.all([
         s.listSessionsByUser(u.id),
         s.getSecurityQuestions(u.id),
+        u.role === "customer"
+          ? s.listBalanceLogs({ userId: u.id, page: 1, pageSize: 10 })
+          : Promise.resolve({ rows: [], total: 0 }),
       ]);
       const onboarding = c.req.query("onboarding") === "1";
       const ctx = pageCtx(c);
@@ -467,6 +470,7 @@ export function registerSystem(app: Hono<AppEnv>) {
             currentDigest: sid ? await sha256hex(sid) : "",
             hasSecQ: !!secq,
             onboarding,
+            balanceLogs: balanceLogs.rows,
           }),
         })
       );
