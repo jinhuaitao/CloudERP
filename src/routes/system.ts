@@ -1,4 +1,4 @@
-// 经营报表 / 用户管理 / 个人中心 / 系统设置 / 备份维护 / 审计日志 / 文件服务
+// 经营报表 / 用户管理 / 个人中心（含客户收货信息管理） / 系统设置（含微信与支付宝收款码设置） / 备份维护 / 审计日志 / 文件服务
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { AppEnv, SafeUser } from "../env";
@@ -23,6 +23,7 @@ import {
   parseForm,
   redirectWith,
   sidFromCookie,
+  saveUpload,
 } from "./helpers";
 import {
   getPagination,
@@ -46,7 +47,6 @@ function notFound(c: Parameters<typeof pageCtx>[0]) {
 
 type Role = SafeUser["role"];
 
-/** 报表日期范围默认值：from=本月1日，to=今天（均为东八区日期） */
 function reportRange(c: Parameters<typeof getPagination>[0]): { from: string; to: string; start: string; end: string } {
   const from = (c.req.query("from") || "").trim() || todayUTC8().slice(0, 7) + "-01";
   const to = (c.req.query("to") || "").trim() || todayUTC8();
@@ -64,7 +64,6 @@ export function registerSystem(app: Hono<AppEnv>) {
         const r = await db.prepare(sql).bind(start, end).first<{ v: number }>();
         return Number(r?.v || 0);
       };
-      // 修复：退货汇总增加 status='done' 过滤，利润扣除销售折扣，并新增实收金额与待收欠款统计
       const [purchaseTotal, salesTotal, salesPaid, salesDiscount, rawProfit, returnTotal, orderCount, commissionTotal] =
         await Promise.all([
           num("SELECT COALESCE(SUM(total),0) AS v FROM purchase_orders WHERE status='done' AND created_at>=? AND created_at<?"),
@@ -118,13 +117,30 @@ export function registerSystem(app: Hono<AppEnv>) {
       let body: (string | number | null | undefined)[][] = [];
       if (type === "sales") {
         filename = `销售单_${from}_${to}.csv`;
-        head = ["单号", "客户", "销售员", "应收金额", "优惠折扣", "实收金额", "欠款金额", "支付方式", "状态", "创建时间"];
+        head = [
+          "单号",
+          "客户",
+          "收货人",
+          "联系电话",
+          "收货地址",
+          "销售员",
+          "应收金额",
+          "优惠折扣",
+          "实收金额",
+          "欠款金额",
+          "支付方式",
+          "状态",
+          "创建时间",
+        ];
         const { rows } = await s.listSalesOrders({ page: 1, pageSize: 5000 });
         body = rows
           .filter((o) => inRange(o.created_at))
           .map((o) => [
             o.order_no,
             o.customer_name || "散客",
+            o.shipping_name || "",
+            o.shipping_phone || "",
+            o.shipping_address || "",
             o.sales_name || "",
             o.total,
             o.discount,
@@ -263,6 +279,8 @@ export function registerSystem(app: Hono<AppEnv>) {
         nickname,
         phone: (fields.phone || "").trim(),
         email: (fields.email || "").trim(),
+        shipping_name: (fields.shipping_name || "").trim() || (role === "customer" ? nickname : ""),
+        address: (fields.address || "").trim(),
       };
       if (role === "sales") {
         const level = parseInt(fields.sales_level || "1", 10) || 1;
@@ -332,6 +350,8 @@ export function registerSystem(app: Hono<AppEnv>) {
         nickname: (fields.nickname || "").trim() || target.username,
         phone: (fields.phone || "").trim(),
         email: (fields.email || "").trim(),
+        shipping_name: (fields.shipping_name || "").trim(),
+        address: (fields.address || "").trim(),
       };
       if (newRole === "sales") {
         const level = parseInt(fields.sales_level || "1", 10) || 1;
@@ -422,7 +442,7 @@ export function registerSystem(app: Hono<AppEnv>) {
     }
   });
 
-  // ================= 个人中心 =================
+  // ================= 个人中心（含收货信息设置） =================
   app.get("/profile", async (c) => {
     try {
       const u = me(c);
@@ -434,10 +454,11 @@ export function registerSystem(app: Hono<AppEnv>) {
         s.listSessionsByUser(u.id),
         s.getSecurityQuestions(u.id),
       ]);
+      const onboarding = c.req.query("onboarding") === "1";
       const ctx = pageCtx(c);
       return c.html(
         layout({
-          title: "个人中心",
+          title: u.role === "customer" ? "收货信息与个人中心" : "个人中心",
           ctx,
           active: "profile",
           content: profilePage(ctx, {
@@ -445,6 +466,7 @@ export function registerSystem(app: Hono<AppEnv>) {
             sessions,
             currentDigest: sid ? await sha256hex(sid) : "",
             hasSecQ: !!secq,
+            onboarding,
           }),
         })
       );
@@ -460,16 +482,44 @@ export function registerSystem(app: Hono<AppEnv>) {
     const s = store(c);
     try {
       const { fields } = await parseForm(c);
-      await s.updateUser(u.id, {
+      const patch: Parameters<Store["updateUser"]>[1] = {
         nickname: (fields.nickname || "").trim() || u.username,
         phone: (fields.phone || "").trim(),
         email: (fields.email || "").trim(),
-      });
-      await s.audit(u.id, "更新资料", "账号", "更新个人资料", clientIP(c));
-      return redirectWith(c, "/profile", "资料更新成功");
+      };
+      if (fields.shipping_name !== undefined) {
+        patch.shipping_name = (fields.shipping_name || "").trim();
+      }
+      if (fields.address !== undefined) {
+        patch.address = (fields.address || "").trim();
+      }
+      await s.updateUser(u.id, patch);
+      await s.audit(u.id, "更新资料", "账号", "更新个人资料与联系方式", clientIP(c));
+      return redirectWith(c, "/profile", "个人资料已保存");
     } catch (e) {
       if (e instanceof HTTPException) throw e;
       return redirectWith(c, "/profile", undefined, "更新失败：" + (e as Error).message);
+    }
+  });
+
+  /** 客户/用户专属收货信息保存接口（收货人、联系电话、详细地址） */
+  app.post("/profile/shipping", async (c) => {
+    const u = me(c);
+    const s = store(c);
+    try {
+      const { fields } = await parseForm(c);
+      const shipping_name = (fields.shipping_name || "").trim() || u.nickname;
+      const phone = (fields.phone || "").trim();
+      const address = (fields.address || "").trim();
+      if (!phone) return redirectWith(c, "/profile", undefined, "请填写收货联系电话");
+      if (!address) return redirectWith(c, "/profile", undefined, "请填写详细收货地址");
+      await s.updateUser(u.id, { shipping_name, phone, address });
+      await s.audit(u.id, "设置收货信息", "收货地址", `更新收货人 ${shipping_name} / ${phone}`, clientIP(c));
+      const nextUrl = fields.next === "shop" ? "/shop" : "/profile";
+      return redirectWith(c, nextUrl, "收货信息（收货人、联系电话、地址）已保存生效");
+    } catch (e) {
+      if (e instanceof HTTPException) throw e;
+      return redirectWith(c, "/profile", undefined, "保存收货信息失败：" + (e as Error).message);
     }
   });
 
@@ -502,7 +552,6 @@ export function registerSystem(app: Hono<AppEnv>) {
         return redirectWith(c, "/profile/password", undefined, "两次输入的新密码不一致");
       }
       await s.setPassword(u.id, await hashPassword(fields.new_password));
-      // 注销其他会话，保留当前会话
       const sid = sidFromCookie(c);
       await s.deleteUserSessions(u.id, sid ? await sha256hex(sid) : undefined);
       await s.audit(u.id, "修改密码", "账号", "用户修改登录密码", clientIP(c));
@@ -576,7 +625,6 @@ export function registerSystem(app: Hono<AppEnv>) {
       const current = sid ? await sha256hex(sid) : "";
       if (!target) return redirectWith(c, "/profile", undefined, "参数错误");
       if (target === current) return redirectWith(c, "/profile", undefined, "不能注销当前会话");
-      // 修复水平越权漏洞：仅允许删除属于当前登录用户的会话
       const deleted = await s.deleteUserSessionById(target, u.id);
       if (!deleted) return redirectWith(c, "/profile", undefined, "会话不存在或无权操作");
       await s.audit(u.id, "注销会话", "账号", "注销指定登录会话", clientIP(c));
@@ -587,7 +635,7 @@ export function registerSystem(app: Hono<AppEnv>) {
     }
   });
 
-  // ================= 系统设置（管理员） =================
+  // ================= 系统设置（管理员：含微信收款码与支付宝收款码配置） =================
   app.get("/settings", async (c) => {
     try {
       needRoles(c, ["admin"]);
@@ -604,7 +652,10 @@ export function registerSystem(app: Hono<AppEnv>) {
     const me = needRoles(c, ["admin"]);
     const s = store(c);
     try {
-      const { fields } = await parseForm(c);
+      const f = await parseForm(c);
+      const { fields } = f;
+      const cur = await s.getSettings();
+
       await s.setSetting("site_name", (fields.site_name || "").trim() || "进销通");
       await s.setSetting("allow_register", fields.allow_register ? "1" : "0");
       for (const k of [
@@ -613,11 +664,51 @@ export function registerSystem(app: Hono<AppEnv>) {
         "commission_l2_default",
         "commission_l1_override",
         "backup_keep",
+        "payment_note",
       ]) {
-        await s.setSetting(k, (fields[k] || "").trim());
+        if (fields[k] !== undefined) {
+          await s.setSetting(k, (fields[k] || "").trim().slice(0, 200));
+        }
       }
-      await s.audit(me.id, "系统设置", "设置", "更新系统设置", clientIP(c));
-      return redirectWith(c, "/settings", "设置已保存");
+
+      // 处理微信收款二维码上传 / 清空
+      let wechatKey = cur.wechat_qr_key || "";
+      if (fields.clear_wechat_qr === "1" && wechatKey) {
+        await c.env.R2.delete(wechatKey).catch(() => {});
+        wechatKey = "";
+        await s.setSetting("wechat_qr_key", "");
+      }
+      const wechatFile = f.file("wechat_qr");
+      if (wechatFile) {
+        const uploadedWechatKey = await saveUpload(c, wechatFile, "payqr");
+        if (uploadedWechatKey) {
+          if (wechatKey && wechatKey !== uploadedWechatKey) {
+            await c.env.R2.delete(wechatKey).catch(() => {});
+          }
+          await s.setSetting("wechat_qr_key", uploadedWechatKey);
+        }
+      }
+
+      // 处理支付宝收款二维码上传 / 清空
+      let alipayKey = cur.alipay_qr_key || "";
+      if (fields.clear_alipay_qr === "1" && alipayKey) {
+        await c.env.R2.delete(alipayKey).catch(() => {});
+        alipayKey = "";
+        await s.setSetting("alipay_qr_key", "");
+      }
+      const alipayFile = f.file("alipay_qr");
+      if (alipayFile) {
+        const uploadedAlipayKey = await saveUpload(c, alipayFile, "payqr");
+        if (uploadedAlipayKey) {
+          if (alipayKey && alipayKey !== uploadedAlipayKey) {
+            await c.env.R2.delete(alipayKey).catch(() => {});
+          }
+          await s.setSetting("alipay_qr_key", uploadedAlipayKey);
+        }
+      }
+
+      await s.audit(me.id, "系统设置", "设置", "更新系统参数与微信/支付宝收款二维码设置", clientIP(c));
+      return redirectWith(c, "/settings", "系统设置与收款二维码已保存");
     } catch (e) {
       if (e instanceof HTTPException) throw e;
       return redirectWith(c, "/settings", undefined, "保存失败：" + (e as Error).message);
@@ -633,7 +724,6 @@ export function registerSystem(app: Hono<AppEnv>) {
         c.env.R2.list({ prefix: "backups/" }),
         s.getSettings(),
       ]);
-      // 按上传时间倒序排列，最新备份排最前
       const backups = (listed.objects || [])
         .map((o) => ({
           key: o.key,

@@ -2,7 +2,6 @@
 (function () {
   "use strict";
 
-  // 防止重复初始化保护锁
   if (window.__JINXIAO_INIT__) return;
   window.__JINXIAO_INIT__ = true;
 
@@ -74,21 +73,43 @@
     });
   }
 
-  // ---------- 5. 图片上传预览 ----------
+  // ---------- 5. 图片上传预览（含商品图、微信收款码、支付宝收款码） ----------
   function imgPreview() {
     document.querySelectorAll('input[type="file"][data-preview]').forEach(function (input) {
       input.addEventListener("change", function () {
-        var target = document.querySelector(input.getAttribute("data-preview"));
+        var sel = input.getAttribute("data-preview");
+        var target = document.querySelector(sel);
         var f = input.files && input.files[0];
         if (target && f) {
           target.src = URL.createObjectURL(f);
           target.style.display = "block";
+          var parentWrap = target.closest(".payqr-preview-wrap");
+          if (parentWrap) {
+            var emptyEl = parentWrap.querySelector(".payqr-empty");
+            if (emptyEl) emptyEl.style.display = "none";
+          }
         }
       });
     });
   }
 
-  // ---------- 6. 订单明细动态行与折扣/实收联动 ----------
+  // ---------- 5b. 收款方式切换时高亮对应微信/支付宝二维码卡片 ----------
+  function paymentQrSwitcher() {
+    var paySel = document.getElementById("paymentSelect");
+    var qrBox = document.getElementById("paymentQrBox");
+    if (!paySel || !qrBox) return;
+    function syncActive() {
+      var val = paySel.value;
+      qrBox.querySelectorAll("[data-payqr-card]").forEach(function (card) {
+        var kind = card.getAttribute("data-payqr-card");
+        card.classList.toggle("active", kind === val);
+      });
+    }
+    paySel.addEventListener("change", syncActive);
+    syncActive();
+  }
+
+  // ---------- 6. 订单明细动态行、客户收货地址自动带出与折扣/实收联动 ----------
   function orderItems() {
     var box = document.getElementById("orderItems");
     if (!box) return;
@@ -97,8 +118,23 @@
     var discountInput = document.getElementById("discountInput");
     var paidInput = document.getElementById("paidInput");
     var fillFullPaidBtn = document.getElementById("fillFullPaidBtn");
+    var customerSelect = document.getElementById("customerSelect");
+    var shipNameInput = document.getElementById("shippingNameInput");
+    var shipPhoneInput = document.getElementById("shippingPhoneInput");
+    var shipAddrInput = document.getElementById("shippingAddressInput");
     var currentReceivable = 0;
     var userEditedPaid = false;
+
+    // 选中客户时自动带出其保存的收货人、联系电话、收货地址
+    if (customerSelect) {
+      customerSelect.addEventListener("change", function () {
+        var opt = customerSelect.selectedOptions[0];
+        if (!opt) return;
+        if (shipNameInput) shipNameInput.value = opt.getAttribute("data-shipping-name") || "";
+        if (shipPhoneInput) shipPhoneInput.value = opt.getAttribute("data-phone") || "";
+        if (shipAddrInput) shipAddrInput.value = opt.getAttribute("data-address") || "";
+      });
+    }
 
     if (paidInput) {
       paidInput.addEventListener("input", function () {
@@ -238,7 +274,6 @@
     function x(i) { return pad.l + i * stepX; }
     function y(v) { return pad.t + ih - (v / max) * ih; }
 
-    // 水平网格线与 Y 轴刻度
     ctx.strokeStyle = isDark ? "#334155" : "#e2e8f0";
     ctx.fillStyle = isDark ? "#94a3b8" : "#64748b";
     ctx.font = "11px sans-serif";
@@ -254,7 +289,6 @@
       ctx.fillText("¥" + (val >= 1000 ? (val / 1000).toFixed(1) + "k" : val), pad.l - 6, gy + 4);
     }
 
-    // 渐变面积填充
     var grad = ctx.createLinearGradient(0, pad.t, 0, h - pad.b);
     grad.addColorStop(0, "rgba(37, 99, 235, 0.32)");
     grad.addColorStop(1, "rgba(37, 99, 235, 0.0)");
@@ -268,7 +302,6 @@
     ctx.fillStyle = grad;
     ctx.fill();
 
-    // 折线
     ctx.beginPath();
     data.forEach(function (d, i) {
       i ? ctx.lineTo(x(i), y(d.total)) : ctx.moveTo(x(i), y(d.total));
@@ -278,7 +311,6 @@
     ctx.lineJoin = "round";
     ctx.stroke();
 
-    // 数据圆点与 X 轴日期
     ctx.textAlign = "center";
     data.forEach(function (d, i) {
       ctx.fillStyle = "#ffffff";
@@ -295,7 +327,6 @@
       }
     });
 
-    // 鼠标悬停提示
     var tooltip = document.getElementById("chartTooltip");
     if (tooltip && !cv.__boundHover) {
       cv.__boundHover = true;
@@ -374,6 +405,7 @@
     confirmHook();
     sidebarAndActions();
     imgPreview();
+    paymentQrSwitcher();
     orderItems();
     salesLevel();
     trendChart();

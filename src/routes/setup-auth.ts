@@ -60,11 +60,20 @@ async function finishLogin(
   s: Store,
   u: User,
   remember: boolean,
-  msg?: string
+  msg?: string,
+  targetUrl?: string
 ): Promise<Response> {
   const { cookie } = await issueSession(c, s, u, remember);
   await s.audit(u.id, "登录", "账号", `用户 ${u.username} 登录成功`, clientIP(c));
-  const res = redirectWith(c, homeFor(u.role as SafeUser["role"]), msg);
+  // 若客户尚未完善联系电话或收货地址，登录后自动引导至个人中心完善收货信息
+  const defaultDest =
+    u.role === "customer" && (!u.phone || !u.address) ? "/profile?onboarding=1" : homeFor(u.role as SafeUser["role"]);
+  const dest = targetUrl || defaultDest;
+  const finalMsg =
+    u.role === "customer" && (!u.phone || !u.address) && !targetUrl
+      ? "欢迎登录！请先完善您的默认收货人、联系电话与收货地址"
+      : msg;
+  const res = redirectWith(c, dest, finalMsg);
   res.headers.append("Set-Cookie", cookie);
   return res;
 }
@@ -177,7 +186,7 @@ export function registerSetupAuth(app: Hono<AppEnv>) {
     return res;
   });
 
-  // ---------- 注册 ----------
+  // ---------- 注册（含收货信息录入与注册后引导设置） ----------
   app.get("/register", (c) => {
     const u = c.get("user");
     if (u) return c.redirect(homeFor(u.role), 302);
@@ -197,7 +206,9 @@ export function registerSetupAuth(app: Hono<AppEnv>) {
       const password = fields.password || "";
       const confirmPw = fields.confirm_password ?? fields.confirm ?? "";
       const nickname = (fields.nickname || "").trim() || username;
+      const shipping_name = (fields.shipping_name || "").trim() || nickname;
       const phone = (fields.phone || "").trim();
+      const address = (fields.address || "").trim();
       const q1 = (fields.q1 || "").trim();
       const a1 = (fields.a1 || "").trim();
       const q2 = (fields.q2 || "").trim();
@@ -218,9 +229,20 @@ export function registerSetupAuth(app: Hono<AppEnv>) {
         role: "customer",
         nickname,
         phone,
+        shipping_name,
+        address,
       });
       await s.setSecurityQuestions(id, q1, await hashAnswer(a1), q2, await hashAnswer(a2));
       await s.audit(id, "注册", "账号", `客户 ${username} 自主注册`, clientIP(c));
+      const newUser = await s.getUserById(id);
+      if (newUser) {
+        // 注册成功后直接自动登录并引导至收货信息确认/设置页（若已填完整收货信息则直达或确认）
+        const msg =
+          phone && address
+            ? "注册成功！已为您自动保存收货信息并登录"
+            : "注册成功！请在此设置您的收货人、联系电话与收货地址以便下单发货";
+        return await finishLogin(c, s, newUser, false, msg, "/profile?onboarding=1");
+      }
       return redirectWith(c, "/login", "注册成功，请登录");
     } catch (e) {
       if (e instanceof HTTPException) throw e;
@@ -281,7 +303,6 @@ export function registerSetupAuth(app: Hono<AppEnv>) {
         return redirectWith(c, "/forgot", undefined, "密保答案不正确，请重试");
       }
       await s.recordRecoveryAttempt(username, ip, true);
-      // 验证通过：直接创建会话登录
       const { cookie } = await issueSession(c, s, u, false);
       await s.audit(u.id, "找回密码", "账号", "通过密保验证登录", ip);
       const res = redirectWith(c, "/profile/password", "身份验证通过，请立即设置新密码");

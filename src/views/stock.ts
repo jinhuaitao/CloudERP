@@ -1,4 +1,4 @@
-// 进货 / 销售 / 退货 / 库存流水 / 盘点 / 预警（返回纯 HTML 片段，由路由层包裹 layout）
+// 进货 / 销售（含收货人、电话、地址及微信/支付宝收款二维码展示） / 退货 / 库存流水 / 盘点 / 预警
 import { esc, money, qty, fmtDT, round2 } from "../lib";
 import {
   pageHead,
@@ -21,7 +21,6 @@ import type {
 import { movementTypeName, paymentName } from "../db";
 import { fileUrl } from "./products";
 
-/** 单据状态徽章 */
 function orderStatusBadge(status: string): string {
   if (status === "void") return badge("已作废", "gray");
   if (status === "done") return badge("已完成", "green");
@@ -32,7 +31,54 @@ function tp(total: number, pageSize: number): number {
   return Math.max(1, Math.ceil(total / pageSize));
 }
 
-// ---------- 动态明细行（app.js 负责增删行与合计计算） ----------
+/** 渲染微信收款码 / 支付宝收款码展示面板（用于开单、自助下单、订单详情与欠款核销） */
+export function paymentQrWidget(ctx: ViewCtx, activeMethod?: string, heading = "📲 扫码收款二维码（微信支付 / 支付宝）"): string {
+  const wechatKey = ctx.settings?.wechat_qr_key || "";
+  const alipayKey = ctx.settings?.alipay_qr_key || "";
+  const note = ctx.settings?.payment_note || "";
+  const wechatUrl = wechatKey ? fileUrl(wechatKey) : "";
+  const alipayUrl = alipayKey ? fileUrl(alipayKey) : "";
+
+  if (!wechatUrl && !alipayUrl) {
+    if (ctx.user?.role === "admin") {
+      return `<div class="payqr-hint-bar no-print">
+        <span>💡 暂未上传收款二维码（上传后可在此处直接展示微信/支付宝二维码供客户扫码付款）</span>
+        <a class="btn small secondary" href="/settings#payqr">⚙️ 前往设置收款码 →</a>
+      </div>`;
+    }
+    return "";
+  }
+
+  return `<div class="payqr-panel" id="paymentQrBox">
+    <div class="payqr-panel-head">
+      <strong>${esc(heading)}</strong>
+      ${
+        ctx.user?.role === "admin"
+          ? `<a class="small no-print" href="/settings#payqr">⚙️ 管理收款码</a>`
+          : `<span class="muted small">请使用微信或支付宝扫码支付</span>`
+      }
+    </div>
+    <div class="payqr-cards">
+      ${
+        wechatUrl
+          ? `<div class="payqr-item wechat${activeMethod === "wechat" ? " active" : ""}" data-payqr-card="wechat">
+              <div class="payqr-tag wechat">💚 微信扫码支付</div>
+              <img src="${esc(wechatUrl)}" alt="微信收款码" class="payqr-display-img">
+            </div>`
+          : ""
+      }
+      ${
+        alipayUrl
+          ? `<div class="payqr-item alipay${activeMethod === "alipay" ? " active" : ""}" data-payqr-card="alipay">
+              <div class="payqr-tag alipay">💙 支付宝扫码支付</div>
+              <img src="${esc(alipayUrl)}" alt="支付宝收款码" class="payqr-display-img">
+            </div>`
+          : ""
+      }
+    </div>
+    ${note ? `<div class="payqr-note">📌 ${esc(note)}</div>` : ""}
+  </div>`;
+}
 
 function productOptions(
   products: Product[],
@@ -247,7 +293,7 @@ export function salesListPage(
   const isCustomer = ctx.user?.role === "customer";
   const newBtn = d.canCreate
     ? `<a class="btn primary" href="/sales/new">＋ 新建销售单</a>`
-    : `<a class="btn primary" href="/shop">🛒 自助下单</a>`;
+    : `<a class="btn secondary" href="/profile">📍 收货信息设置</a> <a class="btn primary" href="/shop">🛒 自助下单</a>`;
 
   const statusOptions = [
     `<option value="">全部状态</option>`,
@@ -260,9 +306,15 @@ export function salesListPage(
       ? d.rows
           .map((o) => {
             const debt = round2(o.total - o.paid);
+            const shipInfo =
+              o.shipping_phone || o.shipping_address
+                ? `<div class="muted small">📍 ${esc(o.shipping_name || "")} ${esc(o.shipping_phone || "")} · ${esc(
+                    (o.shipping_address || "").slice(0, 24)
+                  )}</div>`
+                : "";
             return `<tr>
               <td><a href="/sales/${o.id}"><strong>${esc(o.order_no)}</strong></a></td>
-              <td>${esc(o.customer_name || "零售散客")}</td>
+              <td><strong>${esc(o.customer_name || "零售散客")}</strong>${shipInfo}</td>
               ${d.showSales ? `<td>${esc(o.sales_name || "—")}</td>` : ""}
               <td class="num"><strong>${money(o.total)}</strong>${o.discount > 0 ? `<div class="muted small">已减 ${money(o.discount)}</div>` : ""}</td>
               <td class="num">${money(o.paid)}</td>
@@ -279,14 +331,14 @@ export function salesListPage(
   return `
     ${pageHead(isCustomer ? "📋 我的历史订单" : "📤 销售订单管理", `共 ${d.total} 张销售单`, newBtn)}
     <form class="toolbar" method="get" action="/sales">
-      <input type="text" name="q" value="${esc(d.q)}" placeholder="🔍 搜索销售单号 / 客户名称..." maxlength="64" class="grow">
+      <input type="text" name="q" value="${esc(d.q)}" placeholder="🔍 搜索销售单号 / 客户名称 / 收货电话..." maxlength="64" class="grow">
       <select name="status">${statusOptions}</select>
       <label class="checkbox-row"><input type="checkbox" name="debt" value="1"${d.debtOnly ? " checked" : ""}><span>仅看未结清欠款单</span></label>
       <button class="btn primary" type="submit">查询</button>
       ${d.q || d.status || d.debtOnly ? `<a class="btn secondary" href="/sales">重置</a>` : ""}
     </form>
     <div class="card"><div class="table-wrap"><table class="table">
-      <thead><tr><th>销售单号</th><th>客户</th>${d.showSales ? "<th>归属销售</th>" : ""}<th class="num">应收总额</th><th class="num">实收</th><th class="num">待收欠款</th><th>收款方式</th><th>状态</th><th>开单时间</th><th>操作</th></tr></thead>
+      <thead><tr><th>销售单号</th><th>客户 / 收货信息</th>${d.showSales ? "<th>归属销售</th>" : ""}<th class="num">应收总额</th><th class="num">实收</th><th class="num">待收欠款</th><th>收款方式</th><th>状态</th><th>开单时间</th><th>操作</th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>
     ${pagerHtml("/sales", { q: d.q, status: d.status || "", debt: d.debtOnly ? "1" : "" }, d.page, tp(d.total, d.pageSize))}
@@ -300,25 +352,29 @@ export interface SalesFormData {
   action: string;
   forCustomer: boolean;
   defaultSalesId?: number | null;
+  customerProfile?: User | null;
 }
 
 export function salesFormPage(ctx: ViewCtx, d: SalesFormData): string {
   const sellable = d.products.filter((p) => p.status === "on");
   const isCustomer = d.forCustomer;
+  const cp = d.customerProfile || null;
 
   const customerField = isCustomer
     ? ""
     : field(
-        "客户选择",
-        `<select name="customer_id" id="customerSelect"><option value="">— 零售散客（不记名）—</option>${d.customers
+        "客户选择（选中后自动带出该客户的默认收货信息）",
+        `<select name="customer_id" id="customerSelect"><option value="" data-shipping-name="" data-phone="" data-address="">— 零售散客（不记名）—</option>${d.customers
           .map(
             (u) =>
-              `<option value="${u.id}" data-credit="${u.credit_limit}">${esc(u.nickname)}（@${esc(u.username)}${
-                u.credit_limit > 0 ? ` · 授信 ¥${u.credit_limit}` : ""
-              }）</option>`
+              `<option value="${u.id}" data-credit="${u.credit_limit}" data-shipping-name="${esc(
+                u.shipping_name || u.nickname
+              )}" data-phone="${esc(u.phone)}" data-address="${esc(u.address)}">${esc(u.nickname)}（@${esc(
+                u.username
+              )}${u.phone ? ` · ${esc(u.phone)}` : ""}${u.credit_limit > 0 ? ` · 授信 ¥${u.credit_limit}` : ""}）</option>`
           )
           .join("")}</select>`,
-        "关联客户可统计累计消费并校验赊账授信额度"
+        "关联客户可统计累计消费、自动填入收货地址并校验赊账授信额度"
       );
 
   const salesField = isCustomer
@@ -342,26 +398,58 @@ export function salesFormPage(ctx: ViewCtx, d: SalesFormData): string {
           "选择后将按二级分销规则自动生成销售提成与上级津贴"
         );
 
-  const payOptions = ["cash", "wechat", "alipay", "bank", "credit"]
+  const payOptions = ["wechat", "alipay", "cash", "bank", "credit"]
     .map((k) => `<option value="${k}">${esc(paymentName(k))}</option>`)
     .join("");
 
   return `
     ${pageHead(
       isCustomer ? "🛒 在线自助订货" : "＋ 新建销售开单",
-      isCustomer ? "选择所需商品与数量，提交后立即锁定库存" : "支持折扣核算、一键全额收款、客户授信风控与二级分销自动计提",
-      `<a class="btn secondary" href="/sales">← 返回订单列表</a>`
+      isCustomer ? "已自动带出您的默认收货信息，支持微信/支付宝扫码付款" : "支持客户默认收货地址带出、微信/支付宝收款码展示、折扣核算与二级分销计提",
+      isCustomer
+        ? `<a class="btn secondary" href="/profile">📍 修改默认收货地址</a> <a class="btn secondary" href="/sales">← 我的订单</a>`
+        : `<a class="btn secondary" href="/sales">← 返回订单列表</a>`
     )}
     <form method="post" action="${esc(d.action)}">
       ${csrfInput(ctx.csrf)}
       ${
         isCustomer
-          ? `<div class="card">
-              <div class="form-row">
-                ${field("订货客户", `<input type="text" value="${esc(ctx.user?.nickname || "")} (@${esc(ctx.user?.username || "")})" disabled>`)}
-                ${field("意向结算方式", `<select name="payment">${payOptions}</select>`)}
+          ? `<div class="card highlight-card">
+              <div class="card-head">
+                <h3>📍 收货与配送信息</h3>
+                <a class="small" href="/profile">在个人中心管理默认地址 →</a>
               </div>
-              ${field("订单备注", `<input type="text" name="remark" maxlength="200" placeholder="选填，如期望发货时间、收货地址说明等">`)}
+              <div class="form-row cols-3">
+                ${field(
+                  "收货人姓名",
+                  `<input type="text" name="shipping_name" required maxlength="32" value="${esc(
+                    cp?.shipping_name || cp?.nickname || ctx.user?.nickname || ""
+                  )}" placeholder="收件人姓名">`,
+                  "",
+                  true
+                )}
+                ${field(
+                  "联系电话",
+                  `<input type="tel" name="shipping_phone" required maxlength="20" value="${esc(
+                    cp?.phone || ""
+                  )}" placeholder="收件人手机或电话">`,
+                  "",
+                  true
+                )}
+                ${field("意向结算方式", `<select name="payment" id="paymentSelect">${payOptions}</select>`)}
+              </div>
+              <div class="form-row">
+                ${field(
+                  "详细收货地址",
+                  `<input type="text" name="shipping_address" required maxlength="200" value="${esc(
+                    cp?.address || ""
+                  )}" placeholder="省 / 市 / 区 / 街道门牌号">`,
+                  "首次填写后系统将自动保存为您的默认收货地址",
+                  true
+                )}
+                ${field("订单备注", `<input type="text" name="remark" maxlength="200" placeholder="选填，如期望送达时间、发票抬头等">`)}
+              </div>
+              ${paymentQrWidget(ctx, "wechat")}
             </div>`
           : `<div class="card"><h3>📝 客户与结算信息</h3>
               <div class="form-row">
@@ -378,6 +466,12 @@ export function salesFormPage(ctx: ViewCtx, d: SalesFormData): string {
                 ${field("收款方式", `<select name="payment" id="paymentSelect">${payOptions}</select>`)}
                 ${field("单据备注", `<input type="text" name="remark" maxlength="200" placeholder="选填，发货或收款说明">`)}
               </div>
+              <div class="form-row cols-3">
+                ${field("收货人姓名", `<input type="text" id="shippingNameInput" name="shipping_name" maxlength="32" placeholder="选择客户后自动带出，或手动填写">`)}
+                ${field("收货联系电话", `<input type="tel" id="shippingPhoneInput" name="shipping_phone" maxlength="20" placeholder="选择客户后自动带出">`)}
+                ${field("收货详细地址", `<input type="text" id="shippingAddressInput" name="shipping_address" maxlength="200" placeholder="选择客户后自动带出收货地址">`)}
+              </div>
+              ${paymentQrWidget(ctx, "wechat")}
             </div>`
       }
       ${orderItemsBlock(sellable, "sale_price")}
@@ -406,22 +500,27 @@ export function salesDetailPage(ctx: ViewCtx, o: SalesOrder, canVoid: boolean): 
     })
     .join("");
   const debt = round2(o.total - o.paid);
-  const payOptions = ["cash", "wechat", "alipay", "bank"]
+  const payOptions = ["wechat", "alipay", "cash", "bank"]
     .map((k) => `<option value="${k}">${esc(paymentName(k))}</option>`)
     .join("");
 
   const debtCard =
-    o.status === "done" && debt > 0 && canCollectDebt
+    o.status === "done" && debt > 0
       ? `<div class="card highlight-card no-print">
-          <h3>💳 欠款补收核销（当前待收：${money(debt)}）</h3>
-          <form method="post" action="/sales/${o.id}/pay" class="toolbar" style="margin-bottom:0;border:none;padding:0;box-shadow:none;background:transparent">
-            ${csrfInput(ctx.csrf)}
-            <label>补收金额（元）：</label>
-            <input type="number" name="amount" min="0.01" max="${debt}" step="0.01" value="${debt}" required>
-            <label>收款方式：</label>
-            <select name="payment">${payOptions}</select>
-            <button class="btn success" type="submit">✅ 确认登记收款</button>
-          </form>
+          <h3>💳 ${canCollectDebt ? `欠款补收核销（当前待收：${money(debt)}）` : `待付尾款扫码支付（待付金额：${money(debt)}）`}</h3>
+          ${
+            canCollectDebt
+              ? `<form method="post" action="/sales/${o.id}/pay" class="toolbar" style="margin-bottom:12px;border:none;padding:0;box-shadow:none;background:transparent">
+                  ${csrfInput(ctx.csrf)}
+                  <label>补收金额（元）：</label>
+                  <input type="number" name="amount" min="0.01" max="${debt}" step="0.01" value="${debt}" required>
+                  <label>收款方式：</label>
+                  <select name="payment" id="paymentSelect">${payOptions}</select>
+                  <button class="btn success" type="submit">✅ 确认登记收款</button>
+                </form>`
+              : ""
+          }
+          ${paymentQrWidget(ctx, o.payment === "alipay" ? "alipay" : "wechat", "📲 扫码支付尾款（微信 / 支付宝）")}
         </div>`
       : "";
 
@@ -462,6 +561,8 @@ export function salesDetailPage(ctx: ViewCtx, o: SalesOrder, canVoid: boolean): 
         <div><dt>累计已收金额</dt><dd class="pos"><strong>${money(o.paid)}</strong></dd></div>
         <div><dt>待收挂账欠款</dt><dd class="${debt > 0 ? "neg" : ""}"><strong>${debt > 0 ? money(debt) : "¥0.00（已结清）"}</strong></dd></div>
         <div><dt>结算方式</dt><dd>${esc(paymentName(o.payment))}</dd></div>
+        <div><dt>收货人 / 电话</dt><dd><strong>${esc(o.shipping_name || "—")}</strong> ${esc(o.shipping_phone || "")}</dd></div>
+        <div><dt>收货地址</dt><dd>${esc(o.shipping_address || "门店自提 / 未填地址")}</dd></div>
         <div><dt>开单时间</dt><dd>${fmtDT(o.created_at)}</dd></div>
         <div><dt>单据备注</dt><dd>${esc(o.remark || "无")}</dd></div>
       </dl>
@@ -753,25 +854,26 @@ export function warningPage(ctx: ViewCtx, rows: Product[]): string {
           <tbody>${rows
             .map((p) => {
               const gap = round2(Math.max(0, p.min_stock - p.stock));
+              const img = p.image_key
+                ? `<img class="thumb" src="${fileUrl(p.image_key)}" alt="">`
+                : `<span class="empty-thumb">📦</span>`;
               return `<tr>
-                <td>${p.image_key ? `<img class="thumb" src="${fileUrl(p.image_key)}" alt="${esc(p.name)}" loading="lazy">` : `<span class="empty-thumb">📦</span>`}</td>
-                <td><strong>${esc(p.name)}</strong><div class="muted small">SKU: ${esc(p.sku || "—")} · ${esc(p.category_name || "未分类")}</div></td>
+                <td>${img}</td>
+                <td><strong>${esc(p.name)}</strong>${p.sku ? `<br><span class="muted small">SKU: ${esc(p.sku)}</span>` : ""}</td>
                 <td>${esc(p.supplier_name || "—")}</td>
                 <td class="num neg"><strong>${qty(p.stock)}</strong> ${esc(p.unit)}</td>
                 <td class="num">${qty(p.min_stock)} ${esc(p.unit)}</td>
-                <td class="num neg">缺 ${qty(gap)} ${esc(p.unit)}</td>
+                <td class="num neg">${gap > 0 ? `缺 ${qty(gap)} ${esc(p.unit)}` : "触及警戒线"}</td>
                 <td>${
                   isAdmin
-                    ? `<a class="btn small primary" href="/purchase/new?product_id=${p.id}">📥 一键补货</a>`
-                    : `<span class="badge yellow">待管理员采购</span>`
+                    ? `<a class="btn small primary" href="/purchase/new?product_id=${p.id}">📥 一键去补货</a>`
+                    : `<span class="muted small">请联系管理员采购补货</span>`
                 }</td>
               </tr>`;
             })
             .join("")}</tbody>
         </table></div></div>`
-      : `<div class="card"><div class="empty-state"><span class="empty-ico">🎉</span><strong>全部在售商品库存充足</strong><span class="muted small">当前没有低于安全库存预警线的商品</span></div></div>`;
+      : `<div class="card"><div class="empty-state"><span class="empty-ico">🎉</span><span>太棒了！当前所有上架商品库存均高于安全预警线</span></div></div>`;
 
-  return `
-    ${pageHead("⚠️ 低库存预警中心", `当前共 ${rows.length} 款上架商品库存低于或等于安全预警线`, isAdmin && rows.length > 0 ? `<a class="btn primary" href="/purchase/new">📥 新建采购进货单</a>` : "")}
-    ${body}`;
+  return `${pageHead("⚠️ 低库存安全预警", `共 ${rows.length} 款上架商品库存低于或等于安全库存线`)}${body}`;
 }

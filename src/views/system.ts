@@ -1,4 +1,4 @@
-// 经营报表 / 用户管理 / 个人中心 / 系统设置 / 数据维护 / 操作日志（返回纯 HTML 片段，由路由层包裹 layout）
+// 经营报表 / 用户管理 / 个人中心（含收货信息设置） / 系统设置（含微信与支付宝收款二维码设置） / 数据维护 / 操作日志
 import { esc, money, fmtDT, round2 } from "../lib";
 import {
   pageHead,
@@ -12,6 +12,7 @@ import {
   type ViewCtx,
 } from "./layout";
 import type { User } from "../db";
+import { fileUrl } from "./products";
 
 function tp(total: number, pageSize: number): number {
   return Math.max(1, Math.ceil(total / pageSize));
@@ -106,7 +107,7 @@ export function userListPage(
             const isSelf = ctx.user?.id === u.id;
             return `<tr>
               <td><strong>${esc(u.username)}</strong></td>
-              <td>${esc(u.nickname)}</td>
+              <td>${esc(u.nickname)}${u.role === "customer" && u.address ? `<div class="muted small">📍 ${esc(u.address)}</div>` : ""}</td>
               <td>${roleBadge(u.role)}</td>
               <td>${
                 u.role === "sales"
@@ -144,13 +145,13 @@ export function userListPage(
   return `
     ${pageHead("👤 系统用户与权限管理", `共 ${d.total} 个账户 · 支持管理员、一/二级销售员与客户分级管控`, `<a class="btn primary" href="/users/new">＋ 新建用户</a>`)}
     <form class="toolbar" method="get" action="/users">
-      <input type="text" name="q" value="${esc(d.q)}" placeholder="🔍 搜索用户名 / 昵称 / 电话..." maxlength="64" class="grow">
+      <input type="text" name="q" value="${esc(d.q)}" placeholder="🔍 搜索用户名 / 昵称 / 电话 / 收货地址..." maxlength="64" class="grow">
       <select name="role">${roleOptions}</select>
       <button class="btn primary" type="submit">搜索</button>
       ${d.q || d.role ? `<a class="btn secondary" href="/users">重置</a>` : ""}
     </form>
     <div class="card"><div class="table-wrap"><table class="table">
-      <thead><tr><th>用户名</th><th>昵称 / 名称</th><th>系统角色</th><th>级别 / 授信</th><th>电话</th><th>状态</th><th>管理操作</th></tr></thead>
+      <thead><tr><th>用户名</th><th>昵称 / 收货地址</th><th>系统角色</th><th>级别 / 授信</th><th>电话</th><th>状态</th><th>管理操作</th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>
     ${pagerHtml("/users", { q: d.q, role: d.role || "" }, d.page, tp(d.total, d.pageSize))}
@@ -170,7 +171,7 @@ export function userFormPage(ctx: ViewCtx, d: UserFormData): string {
   const parents = d.salesTeam.filter((p) => !u || p.id !== u.id);
 
   return `
-    ${pageHead(isNew ? "＋ 新建系统用户" : "✏️ 编辑用户权限与资料", u ? `@${u.username}（${roleName(u.role)}）` : "配置用户角色、分销层级或客户授信额度", `<a class="btn secondary" href="/users">← 返回用户列表</a>`)}
+    ${pageHead(isNew ? "＋ 新建系统用户" : "✏️ 编辑用户权限与资料", u ? `@${u.username}（${roleName(u.role)}）` : "配置用户角色、分销层级或客户收货与授信档案", `<a class="btn secondary" href="/users">← 返回用户列表</a>`)}
     <div class="card">
       <form method="post" action="${action}">
         ${csrfInput(ctx.csrf)}
@@ -189,7 +190,7 @@ export function userFormPage(ctx: ViewCtx, d: UserFormData): string {
         </div>
         <div class="form-row cols-3">
           ${field("显示昵称 / 客户名", `<input type="text" name="nickname" maxlength="32" value="${v(u?.nickname)}" required>`, "", true)}
-          ${field("联系电话", `<input type="tel" name="phone" maxlength="20" value="${v(u?.phone)}">`)}
+          ${field("联系电话", `<input type="tel" name="phone" maxlength="20" value="${v(u?.phone)}" placeholder="手机号或座机">`)}
           ${field("电子邮箱", `<input type="email" name="email" maxlength="100" value="${v(u?.email)}">`)}
         </div>
         <div class="form-row">
@@ -239,8 +240,12 @@ export function userFormPage(ctx: ViewCtx, d: UserFormData): string {
           </div>
         </div>
         <div data-show-for="customer" class="role-extra-panel">
-          <h3>🧾 客户授信风控配置 <span class="muted small">（仅当角色为「客户」时生效）</span></h3>
-          ${field("最大允许赊账额度（元）", `<input type="number" name="credit_limit" min="0" step="0.01" value="${v(u?.credit_limit ?? 0)}">`, "当客户累计未结清欠款超过此额度时，系统将自动拦截新的赊销/未付清订单（0 表示不限制或按需控制）")}
+          <h3>📍 客户收货信息与授信风控配置 <span class="muted small">（仅当角色为「客户」时生效）</span></h3>
+          <div class="form-row">
+            ${field("默认收货人姓名", `<input type="text" name="shipping_name" maxlength="32" value="${v(u?.shipping_name)}" placeholder="默认同客户昵称">`)}
+            ${field("最大允许赊账额度（元）", `<input type="number" name="credit_limit" min="0" step="0.01" value="${v(u?.credit_limit ?? 0)}">`, "当客户累计欠款超过此额度时自动拦截赊销")}
+          </div>
+          ${field("默认收货详细地址", `<input type="text" name="address" maxlength="200" value="${v(u?.address)}" placeholder="省 / 市 / 区 / 街道详细门牌号">`)}
         </div>
         <div class="btn-row mt">
           <button class="btn primary" type="submit">${isNew ? "✅ 创建用户" : "💾 保存修改"}</button>
@@ -250,7 +255,7 @@ export function userFormPage(ctx: ViewCtx, d: UserFormData): string {
     </div>`;
 }
 
-// ================= 个人中心 =================
+// ================= 个人中心（含客户收货信息专属设置卡片） =================
 
 export interface SessionInfo {
   id: string;
@@ -262,10 +267,68 @@ export interface SessionInfo {
 
 export function profilePage(
   ctx: ViewCtx,
-  d: { user: User; sessions: SessionInfo[]; currentDigest: string; hasSecQ: boolean }
+  d: { user: User; sessions: SessionInfo[]; currentDigest: string; hasSecQ: boolean; onboarding?: boolean }
 ): string {
   const u = d.user;
+  const isCustomer = u.role === "customer";
+  const missingShipping = !u.phone || !u.address;
   const otherSessionsCount = d.sessions.filter((s) => s.id !== d.currentDigest).length;
+
+  const onboardingBanner =
+    isCustomer && (d.onboarding || missingShipping)
+      ? `<div class="card highlight-card" style="background:var(--primary-soft);border-color:var(--primary)">
+          <div class="card-head" style="margin-bottom:4px">
+            <h3>👋 欢迎使用 ${esc(ctx.appName)}！请确认或完善您的收货信息</h3>
+            ${!missingShipping ? `<a class="btn small primary" href="/catalog">🛍️ 前往选购商品 →</a>` : ""}
+          </div>
+          <p class="muted small" style="margin:0">完善下方的<strong>收货人姓名、联系电话与详细收货地址</strong>后，您在自助下单时系统将自动为您带出配送信息，无需重复输入。</p>
+        </div>`
+      : "";
+
+  const shippingCard = `
+    <div class="card highlight-card" id="shipping">
+      <div class="card-head">
+        <h3>📍 默认收货信息设置（收货人 / 联系电话 / 收货地址）</h3>
+        ${
+          u.phone && u.address
+            ? badge("已配置完整收货地址", "green")
+            : badge("待完善收货地址", "yellow")
+        }
+      </div>
+      <p class="muted small mb">用于订单发货与物流配送，保存后在「自助下单」与商家代客开单时将自动填充。</p>
+      <form method="post" action="/profile/shipping">
+        ${csrfInput(ctx.csrf)}
+        <div class="form-row">
+          ${field(
+            "收货人姓名",
+            `<input type="text" name="shipping_name" required maxlength="32" value="${esc(u.shipping_name || u.nickname)}" placeholder="请填写收件人真实姓名或联系人">`,
+            "",
+            true
+          )}
+          ${field(
+            "收货联系电话",
+            `<input type="tel" name="phone" required maxlength="20" value="${esc(u.phone)}" placeholder="请填写手机号码或座机，保持畅通">`,
+            "",
+            true
+          )}
+        </div>
+        ${field(
+          "详细收货地址",
+          `<input type="text" name="address" required maxlength="200" value="${esc(u.address)}" placeholder="请填写省、市、区（县）、街道及详细门牌号 / 仓库地址">`,
+          "请确保地址准确完整，以便安排物流配送",
+          true
+        )}
+        <div class="btn-row">
+          <button class="btn primary" type="submit">💾 保存收货信息</button>
+          ${
+            isCustomer
+              ? `<button class="btn success" type="submit" name="next" value="shop">🛒 保存并前往下单 →</button>`
+              : ""
+          }
+        </div>
+      </form>
+    </div>`;
+
   const sessions =
     d.sessions.length > 0
       ? d.sessions
@@ -288,15 +351,21 @@ export function profilePage(
       : emptyRow(6, "暂无活跃登录设备");
 
   return `
-    ${pageHead("🛡️ 个人中心与账号安全", `当前登录：@${u.username}（${roleName(u.role)}）`)}
+    ${pageHead(
+      isCustomer ? "📍 收货信息与个人中心" : "🛡️ 个人中心与账号安全",
+      `当前登录：@${u.username}（${roleName(u.role)}）`,
+      isCustomer ? `<a class="btn primary" href="/shop">🛒 我要下单</a>` : ""
+    )}
+    ${onboardingBanner}
+    ${shippingCard}
     <div class="grid cols-2">
-      <div class="card"><h3>📝 个人基础资料</h3>
+      <div class="card"><h3>📝 账号基础资料</h3>
         <form method="post" action="/profile">
           ${csrfInput(ctx.csrf)}
-          ${field("显示昵称", `<input type="text" name="nickname" maxlength="32" value="${esc(u.nickname)}" required>`, "", true)}
+          ${field("显示昵称 / 企业名称", `<input type="text" name="nickname" maxlength="32" value="${esc(u.nickname)}" required>`, "", true)}
           ${field("联系电话", `<input type="tel" name="phone" maxlength="20" value="${esc(u.phone)}">`)}
           ${field("电子邮箱", `<input type="email" name="email" maxlength="100" value="${esc(u.email)}">`)}
-          <button class="btn primary" type="submit">💾 保存个人资料</button>
+          <button class="btn secondary" type="submit">💾 更新账号资料</button>
         </form>
       </div>
       <div>
@@ -365,14 +434,84 @@ export function securityFormPage(ctx: ViewCtx, has: boolean): string {
     </div>`;
 }
 
-// ================= 系统设置 =================
+// ================= 系统设置（含微信收款码与支付宝收款码设置） =================
 
 export function settingsPage(ctx: ViewCtx, s: Record<string, string>): string {
   const v = (k: string): string => esc(s[k] ?? "");
+  const wechatQr = s["wechat_qr_key"] ? fileUrl(s["wechat_qr_key"]) : "";
+  const alipayQr = s["alipay_qr_key"] ? fileUrl(s["alipay_qr_key"]) : "";
+
   return `
-    ${pageHead("⚙️ 全局系统参数设置", "配置品牌名称、客户自助注册开关、二级分销默认比例与自动备份策略")}
-    <form method="post" action="/settings">
+    ${pageHead("⚙️ 全局系统参数与收款设置", "配置品牌名称、微信/支付宝收款二维码、客户注册开关、二级分销默认比例与自动备份策略")}
+    <form method="post" action="/settings" enctype="multipart/form-data">
       ${csrfInput(ctx.csrf)}
+      <div class="card highlight-card" id="payqr">
+        <div class="card-head">
+          <h3>💳 收款设置（微信收款二维码 / 支付宝收款二维码）</h3>
+          <span>
+            ${wechatQr ? badge("微信码已配置", "green") : badge("微信码未上传", "gray")}
+            ${alipayQr ? badge("支付宝码已配置", "blue") : badge("支付宝码未上传", "gray")}
+          </span>
+        </div>
+        <p class="muted small mb">上传商家收款码图片（支持 JPG / PNG / WebP，存入 Cloudflare R2）。配置后将在<strong>销售开单、客户自助下单、订单详情及欠款补收核销</strong>页面自动展示供客户扫码付款。</p>
+        <div class="grid cols-2 mb">
+          <div class="payqr-upload-box wechat">
+            <div class="payqr-box-head">
+              <span class="payqr-brand-tag wechat">💚 微信支付收款码（WeChat Pay）</span>
+              ${wechatQr ? badge("已生效", "green") : badge("待上传", "yellow")}
+            </div>
+            <div class="payqr-preview-wrap">
+              <img id="wechatQrPrev" class="payqr-img" src="${esc(wechatQr)}" alt="微信收款二维码" ${wechatQr ? "" : 'style="display:none"'}>
+              ${
+                !wechatQr
+                  ? `<div class="payqr-empty" id="wechatQrEmpty"><span>📲</span><span class="small muted">暂未上传微信收款码<br>选择图片后即时预览</span></div>`
+                  : ""
+              }
+            </div>
+            ${field(
+              "上传 / 更换微信收款码图片",
+              `<input type="file" name="wechat_qr" accept="image/jpeg,image/png,image/webp,image/gif" data-preview="#wechatQrPrev">`,
+              "建议使用清晰的方形微信收款码截图（≤5MB）"
+            )}
+            ${
+              wechatQr
+                ? `<label class="checkbox-row small neg"><input type="checkbox" name="clear_wechat_qr" value="1"><span>清除当前已上传的微信收款码</span></label>`
+                : ""
+            }
+          </div>
+
+          <div class="payqr-upload-box alipay">
+            <div class="payqr-box-head">
+              <span class="payqr-brand-tag alipay">💙 支付宝收款码（Alipay）</span>
+              ${alipayQr ? badge("已生效", "blue") : badge("待上传", "yellow")}
+            </div>
+            <div class="payqr-preview-wrap">
+              <img id="alipayQrPrev" class="payqr-img" src="${esc(alipayQr)}" alt="支付宝收款二维码" ${alipayQr ? "" : 'style="display:none"'}>
+              ${
+                !alipayQr
+                  ? `<div class="payqr-empty" id="alipayQrEmpty"><span>📲</span><span class="small muted">暂未上传支付宝收款码<br>选择图片后即时预览</span></div>`
+                  : ""
+              }
+            </div>
+            ${field(
+              "上传 / 更换支付宝收款码图片",
+              `<input type="file" name="alipay_qr" accept="image/jpeg,image/png,image/webp,image/gif" data-preview="#alipayQrPrev">`,
+              "建议使用清晰的方形支付宝收款码截图（≤5MB）"
+            )}
+            ${
+              alipayQr
+                ? `<label class="checkbox-row small neg"><input type="checkbox" name="clear_alipay_qr" value="1"><span>清除当前已上传的支付宝收款码</span></label>`
+                : ""
+            }
+          </div>
+        </div>
+        ${field(
+          "扫码收款备注说明（选填）",
+          `<input type="text" name="payment_note" maxlength="200" value="${v("payment_note")}" placeholder="例如：扫码付款请备注【客户名称+订单号】，转账后请联系客服确认核销">`,
+          "将展示在收款二维码下方提示客户"
+        )}
+      </div>
+
       <div class="card"><h3>🏪 站点与门户配置</h3>
         ${field("系统品牌名称", `<input type="text" name="site_name" maxlength="32" value="${v("site_name")}" placeholder="默认：进销通">`, "展示于侧边栏、顶部导航栏、打印单据抬头及登录页")}
         <label class="checkbox-row mt">
@@ -399,7 +538,7 @@ export function settingsPage(ctx: ViewCtx, s: Record<string, string>): string {
         ${field("自动备份保留份数", `<input type="number" name="backup_keep" min="1" max="60" step="1" value="${v("backup_keep") || "14"}">`, "每日凌晨 3:00 定时任务自动备份至 R2，超出保留份数的旧备份将自动轮转清理")}
       </div>
       <div class="btn-row">
-        <button class="btn primary" type="submit">💾 保存系统设置</button>
+        <button class="btn primary" type="submit">💾 保存系统设置与收款二维码</button>
       </div>
     </form>`;
 }

@@ -105,7 +105,7 @@ export function loginPage(ctx: ViewCtx): string {
     </div>`;
 }
 
-/** 注册页（客户自助注册） */
+/** 注册页（客户自助注册，支持录入或注册后进入个人中心配置收货人、电话与地址） */
 export function registerPage(ctx: ViewCtx, allow: boolean): string {
   if (!allow) {
     return `
@@ -120,18 +120,18 @@ export function registerPage(ctx: ViewCtx, allow: boolean): string {
     <div class="auth-header">
       <span class="badge green">客户入驻</span>
       <h1 class="auth-title">注册客户订货账号</h1>
-      <p class="auth-sub">注册后即可浏览实时商品画册、在线下单并查看历史账单</p>
+      <p class="auth-sub">注册后将自动进入收货设置与订货中心，随时维护收货人、联系电话与配送地址</p>
     </div>
     <form method="post" action="/register">
       ${csrfInput(ctx.csrf)}
       <div class="form-row">
         ${field(
-          "用户名",
+          "登录用户名",
           `<input type="text" name="username" required minlength="3" maxlength="32" autocomplete="username" placeholder="3-32 位字母/数字/中文">`,
           "",
           true
         )}
-        ${field("客户名称 / 昵称", `<input type="text" name="nickname" required maxlength="32" placeholder="公司名或您的称呼">`, "", true)}
+        ${field("客户名称 / 昵称", `<input type="text" name="nickname" required maxlength="32" placeholder="公司名称或您的称呼">`, "", true)}
       </div>
       <div class="form-row">
         ${field(
@@ -147,9 +147,16 @@ export function registerPage(ctx: ViewCtx, allow: boolean): string {
           true
         )}
       </div>
-      ${field("联系电话", `<input type="tel" name="phone" maxlength="20" autocomplete="tel" placeholder="选填，便于发货与对账联系">`)}
+      <div class="auth-secq-box mb">
+        <div class="auth-secq-title">📍 默认收货信息（选填，注册后也可在「收货信息与个人中心」随时添加或修改）</div>
+        <div class="form-row mt-xs">
+          ${field("收货人姓名", `<input type="text" name="shipping_name" maxlength="32" placeholder="默认同客户昵称">`)}
+          ${field("收货联系电话", `<input type="tel" name="phone" maxlength="20" autocomplete="tel" placeholder="手机或固话号码">`)}
+        </div>
+        ${field("详细收货地址", `<input type="text" name="address" maxlength="200" placeholder="省 / 市 / 区 / 街道门牌号，方便商家安排发货">`)}
+      </div>
       ${secQFields()}
-      <button class="btn primary block mt" type="submit">✅ 提交注册</button>
+      <button class="btn primary block mt" type="submit">✅ 提交注册并进入收货设置</button>
     </form>
     <div class="auth-links">
       已有账号？ <a href="/login"><strong>返回登录</strong></a>

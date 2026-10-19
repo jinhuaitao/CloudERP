@@ -1,4 +1,4 @@
-// 进货 / 销售 / 退货 / 库存流水 / 盘点 / 预警 / 客户下单
+// 进货 / 销售（含收货信息） / 退货 / 库存流水 / 盘点 / 预警 / 客户下单
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { AppEnv } from "../env";
@@ -238,6 +238,9 @@ export function registerStock(app: Hono<AppEnv>) {
         discount: parseFloat(fields.discount || "") || 0,
         paid: parseFloat(fields.paid || "") || 0,
         payment: (fields.payment || "").trim() || "cash",
+        shipping_name: (fields.shipping_name || "").trim(),
+        shipping_phone: (fields.shipping_phone || "").trim(),
+        shipping_address: (fields.shipping_address || "").trim(),
         remark: (fields.remark || "").trim(),
         items,
       });
@@ -282,7 +285,6 @@ export function registerStock(app: Hono<AppEnv>) {
     }
   });
 
-  /** 新增：销售单欠款补收核销 */
   app.post("/sales/:id/pay", async (c) => {
     const me = needRoles(c, ["admin", "sales"]);
     const s = store(c);
@@ -430,7 +432,6 @@ export function registerStock(app: Hono<AppEnv>) {
     }
   });
 
-  /** 新增：作废退货单并回滚库存 */
   app.post("/returns/:id/void", async (c) => {
     const me = needRoles(c, ["admin"]);
     const s = store(c);
@@ -451,7 +452,6 @@ export function registerStock(app: Hono<AppEnv>) {
       needRoles(c, ["admin", "sales"]);
       const s = store(c);
       const { page, pageSize } = getPagination(c);
-      // 兼容 product_id 与 productId 两种参数名
       const productIdQ = (c.req.query("product_id") || c.req.query("productId") || "").trim();
       const productId = parseInt(productIdQ, 10) || null;
       const type = (c.req.query("type") || "").trim();
@@ -537,11 +537,15 @@ export function registerStock(app: Hono<AppEnv>) {
     }
   });
 
-  // ================= 客户自助下单 =================
+  // ================= 客户自助下单（自动带出并校验收货信息） =================
   app.get("/shop", async (c) => {
     try {
-      needRoles(c, ["customer"]);
-      const { rows } = await store(c).listProducts({ status: "on", page: 1, pageSize: 200 });
+      const me = needRoles(c, ["customer"]);
+      const s = store(c);
+      const [{ rows }, customerRecord] = await Promise.all([
+        s.listProducts({ status: "on", page: 1, pageSize: 200 }),
+        s.getUserById(me.id),
+      ]);
       const ctx = pageCtx(c);
       return c.html(
         layout({
@@ -554,6 +558,7 @@ export function registerStock(app: Hono<AppEnv>) {
             salesTeam: [],
             action: "/shop",
             forCustomer: true,
+            customerProfile: customerRecord,
           }),
         })
       );
@@ -571,6 +576,12 @@ export function registerStock(app: Hono<AppEnv>) {
       const f = await parseForm(c);
       const fields = f.fields;
       const items = parseItems(f.all);
+      const shipping_name = (fields.shipping_name || "").trim() || me.nickname;
+      const shipping_phone = (fields.shipping_phone || "").trim();
+      const shipping_address = (fields.shipping_address || "").trim();
+      if (!shipping_phone || !shipping_address) {
+        return redirectWith(c, "/shop", undefined, "请填写收货联系电话与详细收货地址以便商家发货");
+      }
       const payment = (fields.payment || "").trim() || "wechat";
       const order_no = await s.createSalesOrder({
         customer_id: me.id,
@@ -579,11 +590,14 @@ export function registerStock(app: Hono<AppEnv>) {
         discount: 0,
         paid: 0,
         payment,
+        shipping_name,
+        shipping_phone,
+        shipping_address,
         remark: (fields.remark || "").trim(),
         items,
       });
       await s.audit(me.id, "客户下单", "销售单", `客户自助下单 ${order_no}`, clientIP(c));
-      return redirectWith(c, "/sales", `订单 ${order_no} 提交成功，等待商家核实收款`);
+      return redirectWith(c, "/sales", `订单 ${order_no} 提交成功，已同步更新您的默认收货信息`);
     } catch (e) {
       if (e instanceof HTTPException) throw e;
       return redirectWith(c, "/shop", undefined, "下单失败：" + (e as Error).message);

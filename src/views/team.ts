@@ -1,4 +1,4 @@
-// 客户管理 / 销售团队 / 分佣结算（返回纯 HTML 片段，由路由层包裹 layout）
+// 客户管理（含收货人、电话、地址） / 销售团队 / 分佣结算
 import { esc, money, qty, fmtDT } from "../lib";
 import {
   pageHead,
@@ -12,7 +12,6 @@ import {
 } from "./layout";
 import type { User, SalesOrder, Commission } from "../db";
 
-/** 团队树节点 */
 export type TeamNode = User & { children: TeamNode[] };
 
 export interface MonthStat {
@@ -54,7 +53,10 @@ export function customerListPage(
           .map(
             (u) => `<tr>
               <td><strong>${esc(u.nickname)}</strong><div class="muted small">@${esc(u.username)}</div></td>
-              <td>${esc(u.phone || "—")}<div class="muted small">${esc(u.email || "")}</div></td>
+              <td>
+                <div><strong>${esc(u.shipping_name || u.nickname)}</strong> · ${esc(u.phone || "未填电话")}</div>
+                <div class="muted small">📍 ${esc(u.address || "暂未设置默认收货地址")}</div>
+              </td>
               <td class="num">${u.orderCount} 笔</td>
               <td class="num"><strong>${money(u.total)}</strong></td>
               <td class="num">${u.credit_limit > 0 ? money(u.credit_limit) : `<span class="muted">不可赊账</span>`}</td>
@@ -62,8 +64,8 @@ export function customerListPage(
               <td class="muted small">${fmtDT(u.created_at)}</td>
               <td>
                 <div class="btn-row">
-                  <a class="btn small secondary" href="/customers/${u.id}">对账详情</a>
-                  ${isAdmin ? `<a class="btn small secondary" href="/users/${u.id}/edit">授信设置</a>` : ""}
+                  <a class="btn small secondary" href="/customers/${u.id}">详情/对账</a>
+                  ${isAdmin ? `<a class="btn small secondary" href="/users/${u.id}/edit">编辑收货/授信</a>` : ""}
                 </div>
               </td>
             </tr>`
@@ -72,14 +74,14 @@ export function customerListPage(
       : emptyRow(8, "暂无客户档案");
 
   return `
-    ${pageHead("👥 客户档案与往来对账", `共 ${d.total} 位客户 · 实时跟踪累计消费、授信额度与待收挂账`, isAdmin ? `<a class="btn primary" href="/users/new">＋ 新增客户账号</a>` : "")}
+    ${pageHead("👥 客户档案与收货对账管理", `共 ${d.total} 位客户 · 集中管理客户收货人、联系电话、配送地址与授信挂账`, isAdmin ? `<a class="btn primary" href="/users/new">＋ 新增客户账号</a>` : "")}
     <form class="toolbar" method="get" action="/customers">
-      <input type="text" name="q" value="${esc(d.q)}" placeholder="🔍 搜索客户名称 / 用户名 / 联系电话..." maxlength="64" class="grow">
+      <input type="text" name="q" value="${esc(d.q)}" placeholder="🔍 搜索客户名称 / 收货人 / 联系电话 / 收货地址..." maxlength="64" class="grow">
       <button class="btn primary" type="submit">搜索</button>
       ${d.q ? `<a class="btn secondary" href="/customers">重置</a>` : ""}
     </form>
     <div class="card"><div class="table-wrap"><table class="table">
-      <thead><tr><th>客户名称 / 账号</th><th>联系方式</th><th class="num">成交单数</th><th class="num">累计消费额</th><th class="num">授信额度</th><th class="num">当前欠款</th><th>注册时间</th><th>操作</th></tr></thead>
+      <thead><tr><th>客户名称 / 账号</th><th>收货人 / 联系电话 / 默认收货地址</th><th class="num">成交单数</th><th class="num">累计消费额</th><th class="num">授信额度</th><th class="num">当前欠款</th><th>注册时间</th><th>操作</th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>
     ${pagerHtml("/customers", { q: d.q }, d.page, tp(d.total, d.pageSize))}
@@ -108,6 +110,7 @@ export function customerDetailPage(
             const oDebt = o.total - o.paid;
             return `<tr>
               <td><a href="/sales/${o.id}"><strong>${esc(o.order_no)}</strong></a></td>
+              <td><span class="small">${esc(o.shipping_name || u.nickname)} · ${esc(o.shipping_phone || u.phone || "—")}<br><span class="muted">${esc(o.shipping_address || u.address || "—")}</span></span></td>
               <td class="num">${money(o.total)}</td>
               <td class="num pos">${money(o.paid)}</td>
               <td class="num ${oDebt > 0.009 ? "neg" : "muted"}">${oDebt > 0.009 ? money(oDebt) : "已结清"}</td>
@@ -117,13 +120,13 @@ export function customerDetailPage(
             </tr>`;
           })
           .join("")
-      : emptyRow(7, "该客户暂无历史订单");
+      : emptyRow(8, "该客户暂无历史订单");
 
   return `
     ${pageHead(
-      `👤 客户往来账目：${u.nickname}`,
+      `👤 客户收货与往来档案：${u.nickname}`,
       `登录账号：@${u.username}`,
-      `${isAdmin ? `<a class="btn secondary" href="/users/${u.id}/edit">⚙️ 调整授信额度</a>` : ""}
+      `${isAdmin ? `<a class="btn secondary" href="/users/${u.id}/edit">⚙️ 编辑收货信息与授信</a>` : ""}
        <a class="btn secondary" href="/customers">← 返回客户列表</a>`
     )}
     <div class="grid cols-4 mb">
@@ -132,19 +135,20 @@ export function customerDetailPage(
       ${statCard("✅", "累计已回款", money(st.paid), "实收总金额", "yellow")}
       ${statCard("⚠️", "当前挂账欠款", money(st.debt), u.credit_limit > 0 ? `授信额度 ${money(u.credit_limit)} · 剩余可用 ${money(remainCredit)}` : "未开通赊账额度", st.debt > 0 ? "red" : "green")}
     </div>
-    <div class="card"><h3>📇 客户档案信息 ${u.status === "active" ? badge("正常", "green") : badge("已禁用", "gray")}</h3>
+    <div class="card"><h3>📍 客户收货与联系资料 ${u.status === "active" ? badge("正常", "green") : badge("已禁用", "gray")}</h3>
       <dl class="kv kv-grid">
-        <div><dt>客户名称</dt><dd><strong>${esc(u.nickname)}</strong></dd></div>
-        <div><dt>登录账号</dt><dd>@${esc(u.username)}</dd></div>
-        <div><dt>联系电话</dt><dd>${esc(u.phone || "—")}</dd></div>
-        <div><dt>电子邮箱</dt><dd>${esc(u.email || "—")}</dd></div>
+        <div><dt>客户名称</dt><dd><strong>${esc(u.nickname)}</strong> (@${esc(u.username)})</dd></div>
+        <div><dt>默认收货人</dt><dd><strong>${esc(u.shipping_name || u.nickname)}</strong></dd></div>
+        <div><dt>联系电话</dt><dd><strong>${esc(u.phone || "未设置")}</strong></dd></div>
         <div><dt>授信额度上限</dt><dd><strong>${money(u.credit_limit)}</strong></dd></div>
+        <div style="grid-column: span 2"><dt>默认收货详细地址</dt><dd><strong>📍 ${esc(u.address || "该客户暂未设置默认收货地址")}</strong></dd></div>
+        <div><dt>电子邮箱</dt><dd>${esc(u.email || "—")}</dd></div>
         <div><dt>注册建档时间</dt><dd>${fmtDT(u.created_at)}</dd></div>
       </dl>
     </div>
-    <div class="card"><h3>🧾 客户历史订单明细（点击未结清订单可登记补收款）</h3>
+    <div class="card"><h3>🧾 客户历史订单明细（含每单收货快照，点击未结清订单可登记补收款）</h3>
       <div class="table-wrap"><table class="table">
-        <thead><tr><th>销售单号</th><th class="num">应收金额</th><th class="num">已收金额</th><th class="num">待收欠款</th><th>状态</th><th>下单时间</th><th>操作</th></tr></thead>
+        <thead><tr><th>销售单号</th><th>收货人 / 电话 / 地址</th><th class="num">应收金额</th><th class="num">已收金额</th><th class="num">待收欠款</th><th>状态</th><th>下单时间</th><th>操作</th></tr></thead>
         <tbody>${orders}</tbody>
       </table></div>
     </div>`;

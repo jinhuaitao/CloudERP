@@ -61,7 +61,7 @@ const CUSTOMER_MENU: MenuItem[] = [
   { group: "在线订货", key: "catalog", icon: "🛍️", label: "商品目录", href: "/catalog" },
   { group: "在线订货", key: "shop", icon: "🛒", label: "自助下单", href: "/shop" },
   { group: "订单与账户", key: "sales", icon: "📋", label: "我的订单", href: "/sales" },
-  { group: "订单与账户", key: "profile", icon: "🛡️", label: "个人中心", href: "/profile" },
+  { group: "订单与账户", key: "profile", icon: "📍", label: "收货信息与个人中心", href: "/profile" },
 ];
 
 function menuFor(role: string): MenuItem[] {
@@ -111,11 +111,11 @@ ${o.head || ""}
         </div>
       </div>
       <h2 class="auth-hero-title">全链路云端进销存与二级分销协同系统</h2>
-      <p class="auth-hero-desc">基于全球边缘网络 D1 + R2 构建，集采购入库、加权平均成本核算、智能库存预警、客户授信风控与二级分销自动计提于一体。</p>
+      <p class="auth-hero-desc">基于全球边缘网络 D1 + R2 构建，集采购入库、加权平均成本核算、智能库存预警、客户收货地址管理、授信风控与二级分销自动计提于一体。</p>
       <div class="auth-feature-list">
         <div class="auth-feature-item"><span>⚡</span><div><strong>实时台账闭环</strong><p>采购、销售、退货、盘点全流程留痕，支持单据打印与回滚</p></div></div>
+        <div class="auth-feature-item"><span>📍</span><div><strong>客户收货档案与自助订货</strong><p>客户注册后可随时配置收货人、联系电话与配送地址，下单自动带出</p></div></div>
         <div class="auth-feature-item"><span>🌳</span><div><strong>二级分销引擎</strong><p>支持按毛利或销售额自动拆算一级/二级佣金与上级管理津贴</p></div></div>
-        <div class="auth-feature-item"><span>🛡️</span><div><strong>企业级安全防护</strong><p>Bcrypt 加密、CSRF 双重校验、登录限流锁定与 R2 自动快照</p></div></div>
       </div>
     </div>
     <div class="auth-card">
@@ -155,7 +155,8 @@ ${o.head || ""}
          <a class="btn small secondary" href="/purchase/new">📥 采购入库</a>`
       : ctx.user.role === "sales"
         ? `<a class="btn small primary" href="/sales/new">＋ 销售开单</a>`
-        : `<a class="btn small primary" href="/shop">🛒 立即订货</a>`;
+        : `<a class="btn small secondary" href="/profile">📍 收货信息</a>
+           <a class="btn small primary" href="/shop">🛒 立即订货</a>`;
 
   const lowAlertPill =
     (ctx.user.role === "admin" || ctx.user.role === "sales") && lowCount > 0
@@ -199,7 +200,7 @@ ${o.head || ""}
         <div class="quick-actions">${quickActions}</div>
         ${lowAlertPill}
         <button id="themeToggle" class="btn-icon" type="button" title="切换深浅色主题">🌓</button>
-        <a href="/profile" class="user-pill" title="个人中心与安全设置">
+        <a href="/profile" class="user-pill" title="个人中心与收货地址设置">
           <span class="user-avatar-dot">${escHtml((ctx.user.nickname || ctx.user.username).slice(0, 1))}</span>
           <span class="user-name-text">${escHtml(ctx.user.nickname)}</span>
           ${roleBadge(ctx.user.role)}
@@ -228,14 +229,12 @@ function escHtml(s: unknown): string {
     .replace(/'/g, "&#39;");
 }
 
-/** 页头：标题 + 副标题 + 右侧操作区 */
 export function pageHead(title: string, sub?: string, actions?: string): string {
   return `<div class="page-head"><div><h2>${escHtml(title)}</h2>${
     sub ? `<p class="sub">${escHtml(sub)}</p>` : ""
   }</div>${actions ? `<div class="btn-row no-print">${actions}</div>` : ""}</div>`;
 }
 
-/** 统计卡片：color 取值 blue | green | red | yellow | purple */
 export function statCard(icon: string, label: string, value: string, sub?: string, color?: string): string {
   const c = color || "blue";
   return `<div class="stat stat-${c}"><div class="icon ${c}">${icon}</div><div class="stat-body"><div class="label">${escHtml(label)}</div><div class="value">${escHtml(value)}</div>${
@@ -243,17 +242,14 @@ export function statCard(icon: string, label: string, value: string, sub?: strin
   }</div></div>`;
 }
 
-/** 徽章：kind 取值 green | red | yellow | blue | gray */
 export function badge(text: string, kind: "green" | "red" | "yellow" | "blue" | "gray"): string {
   return `<span class="badge ${kind}">${escHtml(text)}</span>`;
 }
 
-/** 空表格行 */
 export function emptyRow(cols: number, text = "暂无符合条件的数据记录"): string {
   return `<tr><td colspan="${cols}" class="empty-cell"><div class="empty-state"><span class="empty-ico">📭</span><span>${escHtml(text)}</span></div></td></tr>`;
 }
 
-/** 分页：params 为需保留的查询参数（不含 page） */
 export function pagerHtml(path: string, params: Record<string, string>, page: number, total: number): string {
   if (total <= 1) return "";
   const cur = Math.min(Math.max(1, page), total);
@@ -280,19 +276,16 @@ export function pagerHtml(path: string, params: Record<string, string>, page: nu
   }<span class="pager-info">第 ${cur} / ${total} 页</span></nav>`;
 }
 
-/** CSRF 隐藏字段：每个 POST 表单都必须包含 */
 export function csrfInput(csrf: string): string {
   return `<input type="hidden" name="csrf" value="${escHtml(csrf)}">`;
 }
 
-/** 表单字段包装 */
 export function field(label: string, inner: string, hint?: string, req?: boolean): string {
   return `<div class="field"><label>${escHtml(label)}${req ? ' <span class="req">*</span>' : ""}</label>${inner}${
     hint ? `<div class="hint">${escHtml(hint)}</div>` : ""
   }</div>`;
 }
 
-/** 角色中文名 */
 export function roleName(role: string): string {
   if (role === "admin") return "管理员";
   if (role === "sales") return "销售员";
@@ -305,7 +298,6 @@ function roleBadge(role: string): string {
   return badge(roleName(role), kind as "blue" | "green" | "gray");
 }
 
-/** 居中错误页 */
 export function errorPage(ctx: ViewCtx, code: number, title: string, msg: string): string {
   const back = ctx.user ? (ctx.user.role === "customer" ? "/catalog" : "/dashboard") : "/login";
   const content = `<div class="error-wrap"><div class="code">${code}</div><h2>${escHtml(title)}</h2><p class="muted">${escHtml(msg)}</p><p class="mt"><a class="btn primary" href="${back}">← 返回安全页面</a></p></div>`;

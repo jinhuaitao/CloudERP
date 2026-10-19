@@ -1,8 +1,8 @@
-// 数据访问层：Store 封装所有 D1 操作（含运行时自愈建表与严格库存事务校验）
+// 数据访问层：Store 封装所有 D1 操作（含运行时自愈建表、增量字段自愈与严格库存事务校验）
 import schemaSql from "../migrations/0001_init.sql";
 import { uid, todayUTC8, utc8Range, round2 } from "./lib";
 
-// ---------- 自愈建表（空库自动建表，与 wrangler migrations 共用同一份 SQL） ----------
+// ---------- 自愈建表与存量库字段平滑升级 ----------
 let schemaReady = false;
 function splitStatements(sql: string): string[] {
   return sql
@@ -22,6 +22,23 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       for (let i = 0; i < stmts.length; i += 20) {
         await db.batch(stmts.slice(i, i + 20));
       }
+    } else {
+      // 存量数据库平滑自愈：确保收货人、联系电话、收货地址字段存在
+      const alterCols = [
+        "ALTER TABLE users ADD COLUMN shipping_name TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE users ADD COLUMN address TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE sales_orders ADD COLUMN shipping_name TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE sales_orders ADD COLUMN shipping_phone TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE sales_orders ADD COLUMN shipping_address TEXT NOT NULL DEFAULT ''",
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('wechat_qr_key', ''), ('alipay_qr_key', ''), ('payment_note', '')",
+      ];
+      for (const sql of alterCols) {
+        try {
+          await db.prepare(sql).run();
+        } catch {
+          /* 字段已存在时忽略 */
+        }
+      }
     }
     schemaReady = true;
   } catch (e) {
@@ -39,6 +56,8 @@ export interface User {
   nickname: string;
   phone: string;
   email: string;
+  shipping_name: string;
+  address: string;
   avatar_key: string;
   parent_id: number | null;
   sales_level: number;
@@ -130,6 +149,9 @@ export interface SalesOrder {
   discount: number;
   paid: number;
   payment: string;
+  shipping_name: string;
+  shipping_phone: string;
+  shipping_address: string;
   remark: string;
   status: string;
   created_at: string;
@@ -263,6 +285,8 @@ export class Store {
     nickname?: string;
     phone?: string;
     email?: string;
+    shipping_name?: string;
+    address?: string;
     parent_id?: number | null;
     sales_level?: number;
     commission_rate?: number;
@@ -271,8 +295,8 @@ export class Store {
   }): Promise<number> {
     const r = await this.db
       .prepare(
-        `INSERT INTO users (username,password_hash,role,status,nickname,phone,email,parent_id,sales_level,commission_rate,credit_limit)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+        `INSERT INTO users (username,password_hash,role,status,nickname,phone,email,shipping_name,address,parent_id,sales_level,commission_rate,credit_limit)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
       )
       .bind(
         d.username,
@@ -282,6 +306,8 @@ export class Store {
         d.nickname || "",
         d.phone || "",
         d.email || "",
+        d.shipping_name || "",
+        d.address || "",
         d.parent_id ?? null,
         d.sales_level || 0,
         d.commission_rate || 0,
@@ -299,6 +325,8 @@ export class Store {
         | "nickname"
         | "phone"
         | "email"
+        | "shipping_name"
+        | "address"
         | "status"
         | "parent_id"
         | "sales_level"
@@ -344,8 +372,8 @@ export class Store {
       args.push(o.status);
     }
     if (o.q) {
-      where.push("(username LIKE ? OR nickname LIKE ? OR phone LIKE ?)");
-      args.push(`%${o.q}%`, `%${o.q}%`, `%${o.q}%`);
+      where.push("(username LIKE ? OR nickname LIKE ? OR phone LIKE ? OR shipping_name LIKE ? OR address LIKE ?)");
+      args.push(`%${o.q}%`, `%${o.q}%`, `%${o.q}%`, `%${o.q}%`, `%${o.q}%`);
     }
     const w = where.length ? "WHERE " + where.join(" AND ") : "";
     const total =
@@ -400,7 +428,6 @@ export class Store {
   async deleteSession(digest: string): Promise<void> {
     await this.db.prepare("DELETE FROM sessions WHERE id=?").bind(digest).run();
   }
-  /** 仅删除属于指定用户的会话（防水平越权 IDOR） */
   async deleteUserSessionById(digest: string, userId: number): Promise<boolean> {
     const r = await this.db.prepare("DELETE FROM sessions WHERE id=? AND user_id=?").bind(digest, userId).run();
     return (r.meta.changes || 0) > 0;
@@ -653,7 +680,6 @@ export class Store {
       )
       .run();
     const productId = Number(r.meta.last_row_id);
-    // 期初库存大于 0 时自动写入一条期初入库流水，确保台账全链路完整
     if (initStock > 0) {
       await this.db
         .prepare(
@@ -750,7 +776,6 @@ export class Store {
       if (!p) throw new Error("所选商品不存在");
       prods.set(id, { ...p });
     }
-    // 跟踪同一单据中多行相同商品的累计库存与加权成本
     const simStock = new Map<number, number>();
     for (const [id, p] of prods) simStock.set(id, p.stock);
 
@@ -776,7 +801,6 @@ export class Store {
     const orderId = Number(r.meta.last_row_id);
     const stmts: D1PreparedStatement[] = [];
 
-    // 逐行递推库存与加权平均进价，确保流水 before_qty -> after_qty 连续不乱
     const runStock = new Map<number, number>();
     const runCost = new Map<number, number>();
     for (const [id, p] of prods) {
@@ -788,7 +812,6 @@ export class Store {
       const beforeQty = runStock.get(it.product_id)!;
       const afterQty = round2(beforeQty + it.qty);
       const prevCost = runCost.get(it.product_id)!;
-      // 加权平均成本计算（若原库存 <= 0 则直接取本次进价）
       const newCost =
         beforeQty > 0 && afterQty > 0
           ? round2((beforeQty * prevCost + it.qty * it.price) / afterQty)
@@ -926,6 +949,9 @@ export class Store {
     discount?: number;
     paid?: number;
     payment?: string;
+    shipping_name?: string;
+    shipping_phone?: string;
+    shipping_address?: string;
     remark?: string;
     items: { product_id: number; qty: number; price: number }[];
   }): Promise<string> {
@@ -937,7 +963,6 @@ export class Store {
       if (!p) throw new Error("所选商品不存在");
       prods.set(id, p);
     }
-    // 跟踪同一单据内重复商品的累计扣减，防止拆行绕过库存校验
     const simStock = new Map<number, number>();
     for (const [id, p] of prods) simStock.set(id, p.stock);
 
@@ -962,7 +987,6 @@ export class Store {
       throw new Error(`折扣金额（¥${discount}）不能超过商品小计总额（¥${subtotal}）`);
     }
     const total = round2(Math.max(0, subtotal - discount));
-    // 扣减折扣后的实际毛利
     const profit = round2(rawProfit - discount);
     const paid = round2(Math.max(0, o.paid ?? 0));
     if (paid > total) {
@@ -970,16 +994,34 @@ export class Store {
     }
     const orderDebt = round2(total - paid);
 
-    // 客户授信额度（credit_limit）严格风控校验
-    if (orderDebt > 0 && o.customer_id) {
+    // 读取关联客户信息：校验授信额度 + 自动补全/回写默认收货信息
+    let shipName = (o.shipping_name || "").trim();
+    let shipPhone = (o.shipping_phone || "").trim();
+    let shipAddr = (o.shipping_address || "").trim();
+
+    if (o.customer_id) {
       const customer = await this.getUserById(o.customer_id);
-      if (customer && customer.role === "customer" && customer.credit_limit > 0) {
-        const st = await this.customerStats(customer.id);
-        if (round2(st.debt + orderDebt) > customer.credit_limit) {
-          const remain = Math.max(0, round2(customer.credit_limit - st.debt));
-          throw new Error(
-            `超出客户「${customer.nickname || customer.username}」的赊账额度上限（额度 ¥${customer.credit_limit}，已欠 ¥${st.debt}，剩余可赊 ¥${remain}）`
-          );
+      if (customer && customer.role === "customer") {
+        if (!shipName) shipName = customer.shipping_name || customer.nickname || customer.username;
+        if (!shipPhone) shipPhone = customer.phone || "";
+        if (!shipAddr) shipAddr = customer.address || "";
+
+        if (orderDebt > 0 && customer.credit_limit > 0) {
+          const st = await this.customerStats(customer.id);
+          if (round2(st.debt + orderDebt) > customer.credit_limit) {
+            const remain = Math.max(0, round2(customer.credit_limit - st.debt));
+            throw new Error(
+              `超出客户「${customer.nickname || customer.username}」的赊账额度上限（额度 ¥${customer.credit_limit}，已欠 ¥${st.debt}，剩余可赊 ¥${remain}）`
+            );
+          }
+        }
+        // 如客户档案尚未保存默认联系电话或收货地址，下单填写后自动同步回写到客户档案
+        const userPatch: Partial<Pick<User, "shipping_name" | "phone" | "address">> = {};
+        if (shipName && !customer.shipping_name) userPatch.shipping_name = shipName;
+        if (shipPhone && !customer.phone) userPatch.phone = shipPhone;
+        if (shipAddr && !customer.address) userPatch.address = shipAddr;
+        if (Object.keys(userPatch).length > 0) {
+          await this.updateUser(customer.id, userPatch);
         }
       }
     }
@@ -987,8 +1029,8 @@ export class Store {
     const order_no = uid("SO");
     const r = await this.db
       .prepare(
-        `INSERT INTO sales_orders (order_no,customer_id,sales_id,total,discount,paid,payment,remark)
-         VALUES (?,?,?,?,?,?,?,?)`
+        `INSERT INTO sales_orders (order_no,customer_id,sales_id,total,discount,paid,payment,shipping_name,shipping_phone,shipping_address,remark)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)`
       )
       .bind(
         order_no,
@@ -998,6 +1040,9 @@ export class Store {
         discount,
         paid,
         o.payment || "cash",
+        shipName,
+        shipPhone,
+        shipAddr,
         o.remark || ""
       )
       .run();
@@ -1104,8 +1149,8 @@ export class Store {
     const where: string[] = [];
     const args: unknown[] = [];
     if (o.q) {
-      where.push("(so.order_no LIKE ? OR cu.nickname LIKE ? OR cu.username LIKE ?)");
-      args.push(`%${o.q}%`, `%${o.q}%`, `%${o.q}%`);
+      where.push("(so.order_no LIKE ? OR cu.nickname LIKE ? OR cu.username LIKE ? OR so.shipping_phone LIKE ?)");
+      args.push(`%${o.q}%`, `%${o.q}%`, `%${o.q}%`, `%${o.q}%`);
     }
     if (o.salesId) {
       where.push("so.sales_id=?");
@@ -1217,7 +1262,6 @@ export class Store {
       if (!p) throw new Error("所选商品不存在");
       prods.set(id, p);
     }
-    // 如关联了原销售单，校验原销售单有效性及商品可退数量
     let linkedOrder: SalesOrder | null = null;
     if (o.sales_order_id) {
       linkedOrder = await this.getSalesOrder(o.sales_order_id);
@@ -1533,7 +1577,6 @@ export class Store {
       )
       .bind(salesId, from, to)
       .first<{ p: number }>();
-    // 下级团队业绩
     const r3 = await this.db
       .prepare(
         `SELECT COUNT(*) AS c, COALESCE(SUM(so.total),0) AS t FROM sales_orders so
@@ -1624,7 +1667,6 @@ export class Store {
     };
   }
 
-  /** 按东八区日期聚合近 N 天销售趋势（修复原版 UTC 跨日错位 BUG） */
   async salesTrend(days = 14): Promise<{ date: string; total: number; count: number }[]> {
     const map = new Map<string, { total: number; count: number }>();
     const nowBj = Date.now() + 8 * 3600 * 1000;

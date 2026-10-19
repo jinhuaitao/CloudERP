@@ -1,4 +1,4 @@
--- 进销通 jinxiao-system · 初始化表结构
+-- 进销通 jinxiao-system · 初始化表结构 (v2.2 含客户收货信息与微信/支付宝收款码设置)
 -- 说明：同一份 SQL 同时用于 wrangler d1 migrations 与运行时自愈建表（空库自动建表）
 
 -- ============ 用户体系 ============
@@ -9,8 +9,10 @@ CREATE TABLE IF NOT EXISTS users (
   role TEXT NOT NULL DEFAULT 'customer',      -- admin 管理员 | sales 销售 | customer 客户
   status TEXT NOT NULL DEFAULT 'active',      -- active 正常 | disabled 禁用
   nickname TEXT NOT NULL DEFAULT '',
-  phone TEXT NOT NULL DEFAULT '',
+  phone TEXT NOT NULL DEFAULT '',             -- 联系电话
   email TEXT NOT NULL DEFAULT '',
+  shipping_name TEXT NOT NULL DEFAULT '',     -- 默认收货人姓名
+  address TEXT NOT NULL DEFAULT '',           -- 默认收货详细地址
   avatar_key TEXT NOT NULL DEFAULT '',        -- R2 对象 key
   parent_id INTEGER,                          -- 上级销售 id（二级分销体系）
   sales_level INTEGER NOT NULL DEFAULT 0,     -- 0 非销售 | 1 一级销售 | 2 二级销售
@@ -138,6 +140,9 @@ CREATE TABLE IF NOT EXISTS sales_orders (
   discount REAL NOT NULL DEFAULT 0,
   paid REAL NOT NULL DEFAULT 0,               -- 实收
   payment TEXT NOT NULL DEFAULT 'cash',       -- cash 现金 | wechat 微信 | alipay 支付宝 | bank 银行 | credit 赊账
+  shipping_name TEXT NOT NULL DEFAULT '',     -- 收货人姓名快照
+  shipping_phone TEXT NOT NULL DEFAULT '',    -- 收货联系电话快照
+  shipping_address TEXT NOT NULL DEFAULT '',  -- 收货详细地址快照
   remark TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'done',        -- done 已完成 | void 已作废
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
@@ -186,7 +191,7 @@ CREATE TABLE IF NOT EXISTS stock_movements (
   change REAL NOT NULL,                       -- 正数为增、负数为减
   before_qty REAL NOT NULL,
   after_qty REAL NOT NULL,
-  type TEXT NOT NULL,                         -- purchase_in 进货 | sale_out 销售 | return_in 退货 | adjust 盘点 | void 作废回滚
+  type TEXT NOT NULL,                         -- initial_in 期初 | purchase_in 进货 | sale_out 销售 | return_in 退货 | adjust 盘点 | void 作废回滚
   ref_type TEXT NOT NULL DEFAULT '',
   ref_id INTEGER NOT NULL DEFAULT 0,
   operator_id INTEGER,
@@ -237,5 +242,8 @@ INSERT OR IGNORE INTO settings (k, v) VALUES
   ('commission_l1_default', '5'),
   ('commission_l2_default', '8'),
   ('commission_l1_override', '2'),
+  ('wechat_qr_key', ''),
+  ('alipay_qr_key', ''),
+  ('payment_note', ''),
   ('backup_keep', '14'),
-  ('schema_version', '1');
+  ('schema_version', '2');
