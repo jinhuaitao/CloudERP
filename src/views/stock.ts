@@ -338,7 +338,7 @@ export function purchaseFormPage(
           ${field("采购备注", `<input type="text" name="remark" maxlength="200" placeholder="选填，如：发票号、物流单号">`)}
         </div>
       </div>
-      ${orderItemsBlock(d.products, "purchase_price", { preselectPid: d.preselectPid })}
+      ${orderItemsBlock(d.products, "purchase_price", { preselectPid: d.preselectPid, allowAddRow: false })}
       <div class="btn-row">
         <button class="btn primary" type="submit">✅ 确认审核并入库</button>
         <a class="btn secondary" href="/purchase">取消</a>
