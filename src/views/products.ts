@@ -434,8 +434,9 @@ export function catalogPage(
   const isCustomer = ctx.user?.role === "customer";
   const isAdmin = ctx.user?.role === "admin";
 
-  const cards =
-    rows.length > 0
+  const cards = isAdmin
+    ? ""
+    : rows.length > 0
       ? rows
           .map((p) => {
             const soldout = p.stock <= 0;
@@ -522,12 +523,14 @@ export function catalogPage(
   return `
     ${pageHead(
       "🛍️ 在线商品画册",
-      `共展示 ${rows.length} 款在售商品${isCustomer ? " · 选好数量点「加入购物车」，到「自助下单」统一结算" : ""}`,
+      isAdmin
+        ? `画册图库共 ${d.gallery.length} 张图片 · 商品卡片请在「商品档案」页查看`
+        : `共展示 ${rows.length} 款在售商品${isCustomer ? " · 选好数量点「加入购物车」，到「自助下单」统一结算" : ""}`,
       isCustomer
         ? `<a class="btn primary" href="/shop">🛒 购物车 / 去结算</a>`
         : `<a class="btn primary" href="/sales/new">＋ 代客开单</a>`
     )}
     ${galleryCard}
-    <div class="goods-grid">${cards}</div>
+    ${cards ? `<div class="goods-grid">${cards}</div>` : ""}
     ${cartBar}`;
 }
