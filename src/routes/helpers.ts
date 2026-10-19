@@ -70,6 +70,7 @@ export interface ParsedForm {
   fields: Record<string, string>;
   all: (name: string) => string[];
   file: (name: string) => File | null;
+  files: (name: string) => File[];
 }
 
 /**
@@ -99,6 +100,7 @@ export async function parseForm(c: Context<AppEnv>): Promise<ParsedForm> {
       const v: unknown = fd.get(name);
       return v instanceof File && v.size > 0 ? v : null;
     },
+    files: (name: string) => (fd.getAll(name) as unknown[]).filter((v): v is File => v instanceof File && v.size > 0),
   };
 }
 

@@ -137,10 +137,20 @@ export function productListPage(ctx: ViewCtx, d: ProductListData): string {
 
 // ---------- 商品表单（新建 / 编辑） ----------
 
+/** 画册图库中的一张图片：R2 products/ 前缀对象 + 被多少商品引用 */
+export interface GalleryImage {
+  key: string;
+  size: number;
+  uploaded: string;
+  usedBy: number;
+}
+
 export interface ProductFormData {
   product?: Product | null;
   categories: Category[];
   suppliers: Supplier[];
+  /** 画册图库（供点选） */
+  gallery: GalleryImage[];
 }
 
 export function productFormPage(ctx: ViewCtx, d: ProductFormData): string {
@@ -167,8 +177,19 @@ export function productFormPage(ctx: ViewCtx, d: ProductFormData): string {
     .join("");
 
   const imgBlock = p?.image_key
-    ? `<img id="imgPrev" class="img-preview" src="${fileUrl(p.image_key)}" alt="商品图片"><div class="hint">上传新图片将自动替换原图</div>`
-    : `<img id="imgPrev" class="img-preview" style="display:none" alt="">`;
+    ? `<img id="imgPrev" class="img-preview" src="${fileUrl(p.image_key)}" alt="商品图片"><div class="hint">当前使用画册图库中的 ${esc(p.image_key.split("/").pop() || p.image_key)}</div>`
+    : `<img id="imgPrev" class="img-preview" style="display:none" alt=""><div class="hint">尚未选择商品图片</div>`;
+
+  const gallery = d.gallery || [];
+  const pickTile = (g: GalleryImage) => `<label class="gallery-pick">
+      <input type="radio" name="image_key" value="${esc(g.key)}"${p?.image_key === g.key ? " checked" : ""}>
+      <img src="${fileUrl(g.key)}" alt="" loading="lazy">
+    </label>`;
+  const pickBlock =
+    `<label class="gallery-pick gallery-pick-none">
+      <input type="radio" name="image_key" value=""${!p || !p.image_key ? " checked" : ""}>
+      <span class="none-ico">🚫</span><span class="none-txt">不显示图片</span>
+    </label>` + gallery.map(pickTile).join("");
 
   return `
     ${pageHead(isNew ? "＋ 新建商品档案" : "✏️ 编辑商品档案", p ? `${p.name}（${p.sku || "无SKU"}）` : "录入商品基础资料、价格体系与库存预警阈值", `<a class="btn secondary" href="/products">← 返回商品列表</a>`)}
@@ -205,7 +226,20 @@ export function productFormPage(ctx: ViewCtx, d: ProductFormData): string {
         </div>
       </div>
       <div class="card"><h3>🖼️ 商品图片与备注说明</h3>
-        ${field("商品实拍图（存储在 Cloudflare R2）", `${imgBlock}<input type="file" name="image" accept="image/*" data-preview="#imgPrev" class="mt">`, "支持 JPG / PNG / WebP / GIF 格式")}
+        <div class="form-row">
+          ${field("当前商品图", imgBlock)}
+          ${field(
+            "上传新图片",
+            `<input type="file" name="image" accept="image/*" data-preview="#imgPrev">`,
+            "JPG / PNG / WebP / GIF；新图会自动存入画册图库并作为本商品图片"
+          )}
+        </div>
+        <div class="hint mt">或从下方画册图库点选一张已有图片（换图不会删除原图片，原图仍保留在图库中）：</div>
+        ${
+          gallery.length > 0
+            ? `<div class="gallery-picks">${pickBlock}</div>`
+            : `<p class="muted small mt">画册图库暂无图片，可先在此上传，或前往 <a href="/catalog">商品画册</a> 批量上传后再来点选。</p>`
+        }
         ${field("规格与内部备注", `<textarea name="remark" maxlength="500" placeholder="选填，可填写保修期、存放库位或拿货注意事项">${v(p?.remark)}</textarea>`)}
       </div>
       <div class="btn-row">
@@ -340,17 +374,10 @@ export function supplierFormPage(ctx: ViewCtx, s?: Supplier | null): string {
 export function catalogPage(
   ctx: ViewCtx,
   rows: Product[],
-  f?: { q?: string; categories?: Category[]; categoryId?: string }
+  d: { gallery: GalleryImage[]; truncated: boolean }
 ): string {
   const isCustomer = ctx.user?.role === "customer";
-  const catOptions = [`<option value="">全部分类</option>`]
-    .concat(
-      (f?.categories || []).map(
-        (c) =>
-          `<option value="${c.id}"${String(f?.categoryId || "") === String(c.id) ? " selected" : ""}>${esc(c.name)}</option>`
-      )
-    )
-    .join("");
+  const isAdmin = ctx.user?.role === "admin";
 
   const cards =
     rows.length > 0
@@ -403,6 +430,40 @@ export function catalogPage(
       </div>`
     : "";
 
+  const galleryTile = (g: GalleryImage) => `<div class="gallery-tile">
+      <div class="gallery-img"><img src="${fileUrl(g.key)}" alt="" loading="lazy"></div>
+      <div class="gallery-meta">
+        <span class="muted small">${esc(g.uploaded.slice(0, 10))}</span>
+        ${g.usedBy > 0 ? badge(`${g.usedBy} 款在用`, "blue") : badge("未引用", "gray")}
+      </div>
+      <form method="post" action="/catalog/image/delete" data-confirm="从 R2 删除图片 ${esc(g.key)} 后不可恢复，确定删除吗？">
+        ${csrfInput(ctx.csrf)}
+        <input type="hidden" name="key" value="${esc(g.key)}">
+        <button class="btn small danger" type="submit"${g.usedBy > 0 ? " disabled title=\"该图片正被商品使用，请先为商品换图\"" : ""}>删除</button>
+      </form>
+    </div>`;
+
+  const galleryCard = isAdmin
+    ? `<div class="card gallery-card">
+        <div class="card-head">
+          <h3>🖼️ 画册图库（${d.gallery.length} 张）</h3>
+          <form method="post" action="/catalog/images" enctype="multipart/form-data" class="upload-form">
+            ${csrfInput(ctx.csrf)}
+            <input type="file" name="images" accept="image/*" multiple required>
+            <button class="btn small primary" type="submit">📤 上传到画册</button>
+          </form>
+        </div>
+        <p class="muted small mb">图库里的图片可在「新建 / 编辑商品档案」时直接点选复用；删除商品不会删除图片，只有在这里删除才会真正移除 R2 对象。正在被商品使用的图片不可删除。</p>
+        ${
+          d.gallery.length > 0
+            ? `<div class="gallery-grid">${d.gallery.map(galleryTile).join("")}</div>${
+                d.truncated ? `<p class="muted small mt">图库共 ${d.gallery.length} 张（单次最多展示 1000 张，更早的图片需按 key 直接引用）。</p>` : ""
+              }`
+            : `<div class="empty-state"><span class="empty-ico">🖼️</span><span>画册图库为空，上方可批量上传商品图片</span></div>`
+        }
+      </div>`
+    : "";
+
   return `
     ${pageHead(
       "🛍️ 在线商品画册",
@@ -411,12 +472,7 @@ export function catalogPage(
         ? `<a class="btn primary" href="/shop">🛒 购物车 / 去结算</a>`
         : `<a class="btn primary" href="/sales/new">＋ 代客开单</a>`
     )}
-    <form class="toolbar" method="get" action="/catalog">
-      <input type="text" name="q" value="${esc(f?.q || "")}" placeholder="🔍 搜索商品名称或编码..." maxlength="64" class="grow">
-      <select name="category_id">${catOptions}</select>
-      <button class="btn primary" type="submit">查找</button>
-      ${f?.q || f?.categoryId ? `<a class="btn secondary" href="/catalog">重置</a>` : ""}
-    </form>
+    ${galleryCard}
     <div class="goods-grid">${cards}</div>
     ${cartBar}`;
 }

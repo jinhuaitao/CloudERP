@@ -925,6 +925,77 @@ canvas.chart { width: 100%; height: 100%; display: block; }
 .img-preview { max-width: 160px; max-height: 160px; border-radius: 10px; border: 1px solid var(--border); margin-top: 8px; display: block; }
 .backup-row { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--border); gap: 12px; }
 
+/* ---------- 画册图库（R2 图片库 + 商品建档点选） ---------- */
+.gallery-card .card-head { align-items: flex-start; flex-wrap: wrap; }
+.gallery-picks,
+.gallery-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+.gallery-pick {
+  position: relative;
+  display: block;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--bg-elevated);
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.gallery-pick img { width: 100%; height: 104px; object-fit: cover; display: block; }
+.gallery-pick input {
+  position: absolute;
+  top: 7px;
+  left: 7px;
+  margin: 0;
+  accent-color: var(--primary);
+}
+.gallery-pick:hover { border-color: var(--primary); }
+/* 点选即时高亮无需 JS：用 :has() 匹配被选中的 radio */
+.gallery-pick:has(input:checked) {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px var(--primary) inset;
+}
+.gallery-pick-none {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 104px;
+  border-style: dashed;
+}
+.gallery-pick-none input { position: static; }
+.gallery-pick-none .none-ico { font-size: 20px; }
+.gallery-pick-none .none-txt { font-size: 12.5px; color: var(--muted); }
+.gallery-tile {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--bg-elevated);
+}
+.gallery-img { height: 104px; background: var(--bg-elevated); }
+.gallery-img img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.gallery-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  padding: 8px 10px 0;
+}
+.gallery-meta .badge { white-space: nowrap; }
+.gallery-tile form { padding: 8px 10px 10px; }
+.gallery-tile .btn { width: 100%; }
+.upload-form { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.upload-form input[type="file"] { font-size: 12.5px; max-width: 260px; }
+@media (max-width: 768px) {
+  .gallery-picks,
+  .gallery-grid { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); }
+}
+
 /* ---------- 打印样式（单据凭证直接打印） ---------- */
 @media print {
   body { background: #ffffff !important; color: #000000 !important; }

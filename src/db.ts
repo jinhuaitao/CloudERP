@@ -961,6 +961,15 @@ export class Store {
     if ((c?.c || 0) > 0) throw new Error("该商品已有库存流水记录，禁止删除（可将其下架）");
     await this.db.prepare("DELETE FROM products WHERE id=?").bind(id).run();
   }
+  /** 画册图库中每张图片被多少商品引用（key → 商品数），用于选图展示与删除保护 */
+  async imageUsage(): Promise<Record<string, number>> {
+    const r = await this.db
+      .prepare("SELECT image_key, COUNT(*) AS c FROM products WHERE image_key<>'' GROUP BY image_key")
+      .all<{ image_key: string; c: number }>();
+    const out: Record<string, number> = {};
+    for (const row of r.results || []) out[row.image_key] = Number(row.c);
+    return out;
+  }
   async lowStockProducts(): Promise<Product[]> {
     return (
       (

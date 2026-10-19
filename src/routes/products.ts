@@ -10,6 +10,7 @@ import {
   supplierPage,
   supplierFormPage,
   catalogPage,
+  type GalleryImage,
 } from "../views/products";
 import { store, pageCtx, needRoles, parseForm, redirectWith, saveUpload } from "./helpers";
 import { getPagination, clientIP } from "../lib";
@@ -23,6 +24,32 @@ function intOrNull(v: string | undefined): number | null {
 }
 function notFound(c: Parameters<typeof pageCtx>[0]) {
   return c.html(errorPage(pageCtx(c), 404, "页面不存在", "请求的记录不存在或已被删除。"), 404);
+}
+
+/** 画册图库 = R2 的 products/ 前缀对象清单 + 每张图的被引用数（不建表，R2 即图库） */
+async function listGallery(
+  c: Parameters<typeof pageCtx>[0],
+  s: ReturnType<typeof store>
+): Promise<{ images: GalleryImage[]; truncated: boolean }> {
+  const [listed, usage] = await Promise.all([c.env.R2.list({ prefix: "products/" }), s.imageUsage()]);
+  const images = (listed.objects || [])
+    .map((o) => ({ key: o.key, size: o.size, uploaded: o.uploaded.toISOString(), usedBy: usage[o.key] || 0 }))
+    .sort((a, b) => b.uploaded.localeCompare(a.uploaded));
+  return { images, truncated: !!listed.truncated };
+}
+
+/** 商品图最终 key：本次新上传 > 表单点选（空值=不显示图片）> 原图 */
+async function resolveImageKey(
+  c: Parameters<typeof pageCtx>[0],
+  f: Awaited<ReturnType<typeof parseForm>>,
+  current: string
+): Promise<string> {
+  const uploaded = await saveUpload(c, f.file("image"), "products");
+  if (uploaded) return uploaded;
+  const picked = f.fields.image_key;
+  if (picked === undefined) return current;
+  const key = picked.trim();
+  return key === "" || key.startsWith("products/") ? key : current;
 }
 
 export function registerProducts(app: Hono<AppEnv>) {
@@ -80,14 +107,18 @@ export function registerProducts(app: Hono<AppEnv>) {
     try {
       needRoles(c, ["admin"]);
       const s = store(c);
-      const [categories, suppliers] = await Promise.all([s.listCategories(), s.listSuppliers()]);
+      const [categories, suppliers, gallery] = await Promise.all([
+        s.listCategories(),
+        s.listSuppliers(),
+        listGallery(c, s),
+      ]);
       const ctx = pageCtx(c);
       return c.html(
         layout({
           title: "新增商品",
           ctx,
           active: "products",
-          content: productFormPage(ctx, { categories, suppliers }),
+          content: productFormPage(ctx, { categories, suppliers, gallery: gallery.images }),
         })
       );
     } catch (e) {
@@ -105,7 +136,7 @@ export function registerProducts(app: Hono<AppEnv>) {
       const fields = f.fields;
       const name = (fields.name || "").trim();
       if (!name) return redirectWith(c, "/products/new", undefined, "商品名称不能为空");
-      const image_key = await saveUpload(c, f.file("image"), "products");
+      const image_key = await resolveImageKey(c, f, "");
       await s.createProduct({
         name,
         category_id: intOrNull(fields.category_id),
@@ -118,7 +149,7 @@ export function registerProducts(app: Hono<AppEnv>) {
         stock: num(fields.stock),
         min_stock: num(fields.min_stock),
         max_stock: num(fields.max_stock),
-        image_key: image_key || "",
+        image_key,
         remark: (fields.remark || "").trim(),
         operator_id: me.id,
       });
@@ -139,14 +170,18 @@ export function registerProducts(app: Hono<AppEnv>) {
       const id = parseInt(c.req.param("id") || "", 10) || 0;
       const p = id ? await s.getProduct(id) : null;
       if (!p) return notFound(c);
-      const [categories, suppliers] = await Promise.all([s.listCategories(), s.listSuppliers()]);
+      const [categories, suppliers, gallery] = await Promise.all([
+        s.listCategories(),
+        s.listSuppliers(),
+        listGallery(c, s),
+      ]);
       const ctx = pageCtx(c);
       return c.html(
         layout({
           title: "编辑商品",
           ctx,
           active: "products",
-          content: productFormPage(ctx, { product: p, categories, suppliers }),
+          content: productFormPage(ctx, { product: p, categories, suppliers, gallery: gallery.images }),
         })
       );
     } catch (e) {
@@ -167,19 +202,8 @@ export function registerProducts(app: Hono<AppEnv>) {
       const fields = f.fields;
       const name = (fields.name || "").trim();
       if (!name) return redirectWith(c, `/products/${id}/edit`, undefined, "商品名称不能为空");
-      let image_key = p.image_key;
-      const img = f.file("image");
-      if (img) {
-        const key = await saveUpload(c, img, "products");
-        if (p.image_key) {
-          try {
-            await c.env.R2.delete(p.image_key);
-          } catch {
-            /* 忽略旧图删除失败 */
-          }
-        }
-        image_key = key || "";
-      }
+      // 图库中的图片可被多个商品复用，换图时不删除旧对象，只在画册页手动删除
+      const image_key = await resolveImageKey(c, f, p.image_key);
       await s.updateProduct(id, {
         name,
         category_id: intOrNull(fields.category_id),
@@ -213,13 +237,6 @@ export function registerProducts(app: Hono<AppEnv>) {
       const p = id ? await s.getProduct(id) : null;
       if (!p) return notFound(c);
       await s.deleteProduct(id);
-      if (p.image_key) {
-        try {
-          await c.env.R2.delete(p.image_key);
-        } catch {
-          /* 忽略 */
-        }
-      }
       await s.audit(me.id, "删除商品", "商品", `删除商品 ${p.name}（#${id}）`, clientIP(c));
       return redirectWith(c, "/products", "商品已删除");
     } catch (e) {
@@ -438,14 +455,11 @@ export function registerProducts(app: Hono<AppEnv>) {
   // ---------- 选购目录（管理员 / 销售 / 客户） ----------
   app.get("/catalog", async (c) => {
     try {
-      needRoles(c, ["admin", "sales", "customer"]);
+      const me = needRoles(c, ["admin", "sales", "customer"]);
       const s = store(c);
-      const q = (c.req.query("q") || "").trim();
-      const categoryIdQ = (c.req.query("category_id") || c.req.query("categoryId") || "").trim();
-      const categoryId = parseInt(categoryIdQ, 10) || undefined;
-      const [{ rows }, categories] = await Promise.all([
-        s.listProducts({ status: "on", q: q || undefined, categoryId, page: 1, pageSize: 100 }),
-        s.listCategories(),
+      const [{ rows }, gallery] = await Promise.all([
+        s.listProducts({ status: "on", page: 1, pageSize: 500 }),
+        me.role === "admin" ? listGallery(c, s) : Promise.resolve({ images: [] as GalleryImage[], truncated: false }),
       ]);
       const ctx = pageCtx(c);
       return c.html(
@@ -453,13 +467,54 @@ export function registerProducts(app: Hono<AppEnv>) {
           title: "选购商品",
           ctx,
           active: "catalog",
-          content: catalogPage(ctx, rows, { q, categories, categoryId: categoryIdQ }),
+          content: catalogPage(ctx, rows, { gallery: gallery.images, truncated: gallery.truncated }),
         })
       );
     } catch (e) {
       if (e instanceof HTTPException) throw e;
       const ctx = pageCtx(c);
       return c.html(errorPage(ctx, 500, "出错了", "加载商品目录失败：" + (e as Error).message), 500);
+    }
+  });
+
+  // ---------- 画册图库：批量上传 / 删除 ----------
+  app.post("/catalog/images", async (c) => {
+    const me = needRoles(c, ["admin"]);
+    const s = store(c);
+    try {
+      const f = await parseForm(c);
+      const files = f.files("images");
+      if (files.length === 0) return redirectWith(c, "/catalog", undefined, "请先选择要上传的图片");
+      const keys: string[] = [];
+      for (const file of files) {
+        const key = await saveUpload(c, file, "products");
+        if (key) keys.push(key);
+      }
+      await s.audit(me.id, "画册上传", "商品", `上传 ${keys.length} 张画册图片`, clientIP(c));
+      return redirectWith(c, "/catalog", `已上传 ${keys.length} 张图片到画册图库`);
+    } catch (e) {
+      if (e instanceof HTTPException) throw e;
+      return redirectWith(c, "/catalog", undefined, "上传失败：" + (e as Error).message);
+    }
+  });
+
+  app.post("/catalog/image/delete", async (c) => {
+    const me = needRoles(c, ["admin"]);
+    const s = store(c);
+    try {
+      const f = await parseForm(c);
+      const key = (f.fields.key || "").trim();
+      if (!key.startsWith("products/")) return redirectWith(c, "/catalog", undefined, "参数错误：只能删除画册图库中的图片");
+      const usage = await s.imageUsage();
+      if ((usage[key] || 0) > 0) {
+        return redirectWith(c, "/catalog", undefined, `该图片正被 ${usage[key]} 款商品使用，请先为商品换图或移除图片`);
+      }
+      await c.env.R2.delete(key);
+      await s.audit(me.id, "画册删除", "商品", `删除画册图片 ${key}`, clientIP(c));
+      return redirectWith(c, "/catalog", "图片已从图库删除");
+    } catch (e) {
+      if (e instanceof HTTPException) throw e;
+      return redirectWith(c, "/catalog", undefined, "删除失败：" + (e as Error).message);
     }
   });
 }
