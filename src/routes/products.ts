@@ -52,6 +52,24 @@ async function resolveImageKey(
   return key === "" || key.startsWith("products/") ? key : current;
 }
 
+/** 同一上级下分类名唯一（不同一级下可重名），撞唯一索引时统一回显这句 */
+const categoryDupMsg = "同一上级分类下已有同名分类，请换个名称（不同一级分类下允许重名）";
+
+/** 上级分类归一化：只允许挂在存在的一级分类下，分类最多两级 */
+async function resolveParent(
+  s: ReturnType<typeof store>,
+  raw: string | undefined,
+  selfId = 0
+): Promise<{ parentId: number | null; parentName: string }> {
+  const pid = parseInt((raw || "").trim(), 10);
+  if (!(pid > 0)) return { parentId: null, parentName: "" };
+  if (pid === selfId) throw new Error("不能把分类挂到自己下面");
+  const parent = await s.getCategory(pid);
+  if (!parent) throw new Error("上级分类不存在，请刷新页面后重选");
+  if (parent.parent_id) throw new Error(`「${parent.name}」本身是二级分类，分类最多只支持两级`);
+  return { parentId: parent.id, parentName: parent.name };
+}
+
 export function registerProducts(app: Hono<AppEnv>) {
   // ---------- 商品列表 ----------
   app.get("/products", async (c) => {
@@ -298,33 +316,45 @@ export function registerProducts(app: Hono<AppEnv>) {
       const name = (fields.name || "").trim();
       const sort = parseInt(fields.sort || "0", 10) || 0;
       if (!name) return redirectWith(c, "/categories", undefined, "分类名称不能为空");
-      await s.createCategory(name, sort);
-      await s.audit(me.id, "新增分类", "分类", `新增分类 ${name}`, clientIP(c));
-      return redirectWith(c, "/categories", "分类创建成功");
+      const { parentId, parentName } = await resolveParent(s, fields.parent_id);
+      await s.createCategory(name, sort, parentId);
+      await s.audit(me.id, "新增分类", "分类", `新增分类 ${parentName ? parentName + " / " : ""}${name}`, clientIP(c));
+      return redirectWith(c, "/categories", parentName ? `已在「${parentName}」下创建二级分类 ${name}` : `一级分类 ${name} 创建成功`);
     } catch (e) {
       if (e instanceof HTTPException) throw e;
-      const msg = /UNIQUE/i.test((e as Error).message) ? "该分类已存在" : "创建失败：" + (e as Error).message;
+      const msg = /UNIQUE/i.test((e as Error).message) ? categoryDupMsg : "创建失败：" + (e as Error).message;
       return redirectWith(c, "/categories", undefined, msg);
     }
   });
 
-  // 修复原版缺失的分类重命名路由
+  // 改名 / 调整排序 / 改挂上级（一级与二级互转）
   app.post("/categories/:id/rename", async (c) => {
     const me = needRoles(c, ["admin"]);
     const s = store(c);
     const id = parseInt(c.req.param("id") || "", 10) || 0;
     try {
       if (!id) return redirectWith(c, "/categories", undefined, "参数错误");
+      const self = await s.getCategory(id);
+      if (!self) return notFound(c);
       const { fields } = await parseForm(c);
       const name = (fields.name || "").trim();
-      const sort = fields.sort !== undefined ? parseInt(fields.sort || "0", 10) || 0 : undefined;
+      const sort = parseInt(fields.sort || "0", 10) || 0;
       if (!name) return redirectWith(c, "/categories", undefined, "分类名称不能为空");
-      await s.renameCategory(id, name, sort);
-      await s.audit(me.id, "编辑分类", "分类", `更新分类 #${id} 为 ${name}`, clientIP(c));
+      const { parentId, parentName } = await resolveParent(s, fields.parent_id, id);
+      if (parentId && (self.child_count || 0) > 0) {
+        return redirectWith(
+          c,
+          "/categories",
+          undefined,
+          `「${self.name}」下还有 ${self.child_count} 个二级分类，请先处理子分类再把它降为二级`
+        );
+      }
+      await s.renameCategory(id, name, sort, parentId);
+      await s.audit(me.id, "编辑分类", "分类", `更新分类 ${parentName ? parentName + " / " : ""}${name}（#${id}）`, clientIP(c));
       return redirectWith(c, "/categories", "分类已更新");
     } catch (e) {
       if (e instanceof HTTPException) throw e;
-      const msg = /UNIQUE/i.test((e as Error).message) ? "该分类名称已存在" : "更新失败：" + (e as Error).message;
+      const msg = /UNIQUE/i.test((e as Error).message) ? categoryDupMsg : "更新失败：" + (e as Error).message;
       return redirectWith(c, "/categories", undefined, msg);
     }
   });
@@ -335,9 +365,17 @@ export function registerProducts(app: Hono<AppEnv>) {
     const id = parseInt(c.req.param("id") || "", 10) || 0;
     try {
       if (!id) return redirectWith(c, "/categories", undefined, "参数错误");
+      const self = await s.getCategory(id);
+      if (!self) return notFound(c);
       await s.deleteCategory(id);
-      await s.audit(me.id, "删除分类", "分类", `删除分类 #${id}`, clientIP(c));
-      return redirectWith(c, "/categories", "分类已删除");
+      await s.audit(
+        me.id,
+        "删除分类",
+        "分类",
+        `删除分类 ${self.name}（#${id}），${self.product_count || 0} 款商品已归为未分类`,
+        clientIP(c)
+      );
+      return redirectWith(c, "/categories", `分类「${self.name}」已删除`);
     } catch (e) {
       if (e instanceof HTTPException) throw e;
       return redirectWith(c, "/categories", undefined, "删除失败：" + (e as Error).message);

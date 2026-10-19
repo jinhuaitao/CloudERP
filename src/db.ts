@@ -76,13 +76,51 @@ export async function ensureSchema(db: D1Database): Promise<void> {
         /* 字段/索引已存在时忽略 */
       }
     }
+    await upgradeCategoryTree(db);
     schemaReady = true;
   } catch (e) {
     console.error("ensureSchema failed:", (e as Error)?.message);
   }
 }
 
+/**
+ * categories 升级到二级层级版本（对应 migrations/0004）。
+ * 旧表的 name 是建表级 UNIQUE，SQLite 不能 ALTER 掉约束，只能整表重建；
+ * 每一步都可重入，中途崩溃留下的 categories__v2 会在下次冷启动被补做改名，数据不会丢。
+ */
+async function upgradeCategoryTree(db: D1Database): Promise<void> {
+  const tables = await db
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('categories','categories__v2')")
+    .all<{ name: string }>();
+  const names = new Set((tables.results || []).map((r) => r.name));
+  if (names.has("categories__v2") && !names.has("categories")) {
+    await db.prepare("ALTER TABLE categories__v2 RENAME TO categories").run();
+  }
+  const cur = await db
+    .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='categories'")
+    .first<{ sql: string }>();
+  const ddl = cur?.sql || "";
+  if (!ddl || (/parent_id/i.test(ddl) && !/UNIQUE/i.test(ddl))) return;
+  const steps = [
+    `CREATE TABLE IF NOT EXISTS categories__v2 (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      sort INTEGER NOT NULL DEFAULT 0,
+      parent_id INTEGER
+    )`,
+    `INSERT OR IGNORE INTO categories__v2 (id, name, sort, parent_id) SELECT id, name, sort, NULL FROM categories`,
+    `DROP TABLE categories`,
+    `ALTER TABLE categories__v2 RENAME TO categories`,
+    `CREATE INDEX IF NOT EXISTS idx_categories_parent ON categories(IFNULL(parent_id, 0), sort, id)`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_categories_parent_name ON categories(IFNULL(parent_id, 0), name)`,
+  ];
+  for (const sql of steps) await db.prepare(sql).run();
+}
+
 // ---------- 实体类型 ----------
+/** 商品查询的分类联表：二级分类统一展示成「一级 / 二级」 */
+const CATEGORY_JOIN = `LEFT JOIN categories c ON c.id=p.category_id LEFT JOIN categories pc ON pc.id=c.parent_id`;
+const CATEGORY_NAME = `COALESCE(pc.name || ' / ' || c.name, c.name, '') AS category_name`;
 export interface User {
   id: number;
   username: string;
@@ -107,7 +145,10 @@ export interface Category {
   id: number;
   name: string;
   sort: number;
+  /** null = 一级分类；非 null = 挂在哪个一级分类下（只支持两级） */
+  parent_id: number | null;
   product_count?: number;
+  child_count?: number;
 }
 export interface Supplier {
   id: number;
@@ -719,7 +760,9 @@ export class Store {
       (
         await this.db
           .prepare(
-            `SELECT c.*, COUNT(p.id) AS product_count
+            `SELECT c.id, c.name, c.sort, c.parent_id,
+                    COUNT(p.id) AS product_count,
+                    (SELECT COUNT(*) FROM categories k WHERE k.parent_id=c.id) AS child_count
              FROM categories c LEFT JOIN products p ON p.category_id=c.id
              GROUP BY c.id ORDER BY c.sort, c.id`
           )
@@ -727,18 +770,39 @@ export class Store {
       ).results || []
     );
   }
-  async createCategory(name: string, sort = 0): Promise<number> {
-    const r = await this.db.prepare("INSERT INTO categories (name, sort) VALUES (?, ?)").bind(name, sort).run();
+  async getCategory(id: number): Promise<Category | null> {
+    return (
+      (await this.db
+        .prepare(
+          `SELECT c.id, c.name, c.sort, c.parent_id,
+                  (SELECT COUNT(*) FROM products p WHERE p.category_id=c.id) AS product_count,
+                  (SELECT COUNT(*) FROM categories k WHERE k.parent_id=c.id) AS child_count
+           FROM categories c WHERE c.id=?`
+        )
+        .bind(id)
+        .first<Category>()) || null
+    );
+  }
+  /** 级联筛选口径：选中分类本身 + 其下全部二级分类 */
+  async categoryScope(id: number): Promise<number[]> {
+    const kids = await this.db.prepare("SELECT id FROM categories WHERE parent_id=?").bind(id).all<{ id: number }>();
+    return [id, ...(kids.results || []).map((r) => r.id)];
+  }
+  async createCategory(name: string, sort = 0, parentId: number | null = null): Promise<number> {
+    const r = await this.db
+      .prepare("INSERT INTO categories (name, sort, parent_id) VALUES (?, ?, ?)")
+      .bind(name, sort, parentId)
+      .run();
     return Number(r.meta.last_row_id);
   }
-  async renameCategory(id: number, name: string, sort?: number): Promise<void> {
-    if (sort !== undefined) {
-      await this.db.prepare("UPDATE categories SET name=?, sort=? WHERE id=?").bind(name, sort, id).run();
-    } else {
-      await this.db.prepare("UPDATE categories SET name=? WHERE id=?").bind(name, id).run();
-    }
+  async renameCategory(id: number, name: string, sort: number, parentId: number | null): Promise<void> {
+    await this.db.prepare("UPDATE categories SET name=?, sort=?, parent_id=? WHERE id=?").bind(name, sort, parentId, id).run();
   }
   async deleteCategory(id: number): Promise<void> {
+    const self = await this.getCategory(id);
+    if ((self?.child_count || 0) > 0) {
+      throw new Error(`「${self?.name}」下还有 ${self?.child_count} 个二级分类，请先删除子分类或把它们改挂到其他一级分类`);
+    }
     const stmts = [
       this.db.prepare("UPDATE products SET category_id=NULL WHERE category_id=?").bind(id),
       this.db.prepare("DELETE FROM categories WHERE id=?").bind(id),
@@ -819,8 +883,9 @@ export class Store {
       args.push(`%${o.q}%`, `%${o.q}%`, `%${o.q}%`);
     }
     if (o.categoryId) {
-      where.push("p.category_id=?");
-      args.push(o.categoryId);
+      const scope = await this.categoryScope(o.categoryId);
+      where.push(`p.category_id IN (${scope.map(() => "?").join(",")})`);
+      args.push(...scope);
     }
     if (o.status) {
       where.push("p.status=?");
@@ -836,8 +901,8 @@ export class Store {
       (
         await this.db
           .prepare(
-            `SELECT p.*, c.name AS category_name, s.name AS supplier_name FROM products p
-             LEFT JOIN categories c ON c.id=p.category_id LEFT JOIN suppliers s ON s.id=p.supplier_id
+            `SELECT p.*, ${CATEGORY_NAME}, s.name AS supplier_name FROM products p
+             ${CATEGORY_JOIN} LEFT JOIN suppliers s ON s.id=p.supplier_id
              ${w} ORDER BY p.id DESC LIMIT ? OFFSET ?`
           )
           .bind(...args, o.pageSize, (o.page - 1) * o.pageSize)
@@ -849,8 +914,8 @@ export class Store {
     return (
       (await this.db
         .prepare(
-          `SELECT p.*, c.name AS category_name, s.name AS supplier_name FROM products p
-           LEFT JOIN categories c ON c.id=p.category_id LEFT JOIN suppliers s ON s.id=p.supplier_id WHERE p.id=?`
+          `SELECT p.*, ${CATEGORY_NAME}, s.name AS supplier_name FROM products p
+           ${CATEGORY_JOIN} LEFT JOIN suppliers s ON s.id=p.supplier_id WHERE p.id=?`
         )
         .bind(id)
         .first<Product>()) || null
@@ -975,8 +1040,8 @@ export class Store {
       (
         await this.db
           .prepare(
-            `SELECT p.*, c.name AS category_name, s.name AS supplier_name FROM products p
-             LEFT JOIN categories c ON c.id=p.category_id
+            `SELECT p.*, ${CATEGORY_NAME}, s.name AS supplier_name FROM products p
+             ${CATEGORY_JOIN}
              LEFT JOIN suppliers s ON s.id=p.supplier_id
              WHERE p.status='on' AND p.stock <= p.min_stock ORDER BY (p.stock - p.min_stock) ASC, p.stock ASC`
           )
@@ -2345,16 +2410,19 @@ export class Store {
     );
   }
 
+  /** 看板「分类库存占比」：二级分类的金额归并到所属一级，避免图表被二级切碎 */
   async categoryValue(): Promise<{ name: string; value: number; count: number }[]> {
     return (
       (
         await this.db
           .prepare(
-            `SELECT COALESCE(c.name,'未分类') AS name,
+            `SELECT COALESCE(pc.name, c.name, '未分类') AS name,
                     COALESCE(SUM(p.stock*p.purchase_price),0) AS value,
                     COUNT(p.id) AS count
-             FROM products p LEFT JOIN categories c ON c.id=p.category_id
-             GROUP BY p.category_id ORDER BY value DESC`
+             FROM products p
+             LEFT JOIN categories c ON c.id=p.category_id
+             LEFT JOIN categories pc ON pc.id=c.parent_id
+             GROUP BY COALESCE(pc.id, c.id) ORDER BY value DESC`
           )
           .all<{ name: string; value: number; count: number }>()
       ).results || []

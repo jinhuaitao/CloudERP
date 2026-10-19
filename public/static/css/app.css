@@ -991,6 +991,18 @@ canvas.chart { width: 100%; height: 100%; display: block; }
 .gallery-tile .btn { width: 100%; }
 .upload-form { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .upload-form input[type="file"] { font-size: 12.5px; max-width: 260px; }
+
+/* ---------- 分类树（一级 + 二级） ---------- */
+.cat-root > td { background: var(--card); }
+.cat-sub > td { border-top: 1px dashed var(--border); }
+.cat-sub .inline-edit-form { padding-left: 22px; }
+.cat-branch { color: var(--muted); font-size: 13px; margin-right: -2px; }
+.cat-parent-select { width: 132px; padding: 5px 8px; font-size: 12.5px; }
+.cat-parent-select:disabled { opacity: 0.55; cursor: not-allowed; }
+@media (max-width: 768px) {
+  .cat-sub .inline-edit-form { padding-left: 10px; flex-wrap: wrap; }
+  .cat-parent-select { width: 100%; }
+}
 @media (max-width: 768px) {
   .gallery-picks,
   .gallery-grid { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); }

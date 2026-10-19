@@ -26,8 +26,6 @@ const ADMIN_MENU: MenuItem[] = [
   { group: "商品与供应链", key: "products", icon: "📦", label: "商品档案", href: "/products" },
   { group: "商品与供应链", key: "categories", icon: "🗂️", label: "分类与供应商", href: "/categories" },
   { group: "商品与供应链", key: "catalog", icon: "🛍️", label: "商品画册", href: "/catalog" },
-  { group: "进销业务", key: "purchase", icon: "📥", label: "采购进货", href: "/purchase" },
-  { group: "进销业务", key: "sales", icon: "📤", label: "销售开单", href: "/sales" },
   { group: "进销业务", key: "returns", icon: "↩️", label: "销售退货", href: "/returns" },
   { group: "进销业务", key: "return-requests", icon: "🔍", label: "退换货审核", href: "/returns/requests" },
   { group: "库存中心", key: "movements", icon: "🧾", label: "库存流水", href: "/movements" },

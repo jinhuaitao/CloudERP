@@ -28,6 +28,36 @@ function statusBadge(p: Product): string {
   return p.status === "on" ? badge("上架中", "green") : badge("已下架", "gray");
 }
 
+/**
+ * 分类下拉（建档与商品列表筛选共用）：一级作为 optgroup 分组，
+ * 组内第一项是该一级本身（直属商品），后面是它的二级；无子级的一级直接平铺。
+ */
+export function categoryOptions(
+  cats: Category[],
+  selected: number | string | null | undefined,
+  emptyLabel: string,
+  emptyValue = ""
+): string {
+  const sel = String(selected ?? "");
+  const opt = (c: Category, label: string) =>
+    `<option value="${c.id}"${sel === String(c.id) ? " selected" : ""}>${esc(label)}</option>`;
+  const roots = cats.filter((c) => !c.parent_id);
+  const rootIds = new Set(roots.map((r) => r.id));
+  const head = `<option value="${esc(emptyValue)}"${sel === emptyValue ? " selected" : ""}>${esc(emptyLabel)}</option>`;
+  const body = roots
+    .map((r) => {
+      const kids = cats.filter((c) => c.parent_id === r.id);
+      if (kids.length === 0) return opt(r, r.name);
+      return `<optgroup label="${esc(r.name)}">${opt(r, r.name + "（直属）")}${kids
+        .map((k) => opt(k, "　" + k.name))
+        .join("")}</optgroup>`;
+    })
+    .join("");
+  // 兜底：上级已不存在的孤儿分类也要能选到，不能在下拉里隐身
+  const orphans = cats.filter((c) => c.parent_id && !rootIds.has(c.parent_id));
+  return head + body + orphans.map((o) => opt(o, o.name)).join("");
+}
+
 // ---------- 商品列表 ----------
 
 export interface ProductListData {
@@ -48,14 +78,7 @@ export interface ProductListData {
 
 export function productListPage(ctx: ViewCtx, d: ProductListData): string {
   const totalPages = Math.max(1, Math.ceil(d.total / d.pageSize));
-  const catOptions = [`<option value="">全部分类</option>`]
-    .concat(
-      d.categories.map(
-        (c) =>
-          `<option value="${c.id}"${String(d.categoryId) === String(c.id) ? " selected" : ""}>${esc(c.name)}</option>`
-      )
-    )
-    .join("");
+  const catOptions = categoryOptions(d.categories, d.categoryId, "全部分类");
   const statusOptions = [
     `<option value="">全部状态</option>`,
     `<option value="on"${d.status === "on" ? " selected" : ""}>上架中</option>`,
@@ -110,16 +133,20 @@ export function productListPage(ctx: ViewCtx, d: ProductListData): string {
           .join("")
       : emptyRow(8, "暂无符合条件的商品档案");
 
+  const headActions = d.canEdit
+    ? [
+        d.canPurchase ? `<a class="btn secondary" href="/purchase">📥 进货单记录</a>` : "",
+        d.canSell ? `<a class="btn secondary" href="/sales">📤 销售单记录</a>` : "",
+        `<a class="btn secondary" href="/categories">🗂️ 分类与供应商</a>`,
+        `<a class="btn secondary" href="/reports/export?type=products">📥 导出 CSV</a>`,
+        `<a class="btn primary" href="/products/new">＋ 新建商品</a>`,
+      ]
+        .filter(Boolean)
+        .join("")
+    : "";
+
   return `
-    ${pageHead(
-      "📦 商品档案管理",
-      `共 ${d.total} 款商品 · 支持加权平均成本自动核算与安全库存预警`,
-      d.canEdit
-        ? `<a class="btn secondary" href="/categories">🗂️ 分类与供应商</a>
-           <a class="btn secondary" href="/reports/export?type=products">📥 导出 CSV</a>
-           <a class="btn primary" href="/products/new">＋ 新建商品</a>`
-        : ""
-    )}
+    ${pageHead("📦 商品档案管理", `共 ${d.total} 款商品 · 支持加权平均成本自动核算与安全库存预警`, headActions)}
     <form class="toolbar" method="get" action="/products">
       <input type="text" name="q" value="${esc(d.q)}" placeholder="🔍 搜索商品名称 / SKU / 条码..." maxlength="64" class="grow">
       <select name="category_id">${catOptions}</select>
@@ -159,14 +186,7 @@ export function productFormPage(ctx: ViewCtx, d: ProductFormData): string {
   const action = isNew ? "/products" : `/products/${p!.id}`;
   const v = (x: unknown): string => esc(x ?? "");
 
-  const catOptions = [`<option value="">— 未分类 —</option>`]
-    .concat(
-      d.categories.map(
-        (c) =>
-          `<option value="${c.id}"${p && p.category_id === c.id ? " selected" : ""}>${esc(c.name)}</option>`
-      )
-    )
-    .join("");
+  const catOptions = categoryOptions(d.categories, p?.category_id, "— 未分类 —");
   const supOptions = [`<option value="">— 无默认供应商 —</option>`]
     .concat(
       d.suppliers.map(
@@ -252,39 +272,73 @@ export function productFormPage(ctx: ViewCtx, d: ProductFormData): string {
 // ---------- 分类管理 ----------
 
 export function categoryPage(ctx: ViewCtx, cats: Category[]): string {
+  const roots = cats.filter((c) => !c.parent_id);
+  const rootIds = new Set(roots.map((r) => r.id));
+  const kidsOf = (id: number) => cats.filter((c) => c.parent_id === id);
+  /** 上级选择：只能选一级；带二级子级的一级不允许降级，故直接禁用 */
+  const parentSelect = (self: Category) => {
+    const locked = self.parent_id === null && (self.child_count || 0) > 0;
+    const opts = [`<option value="">＋ 一级分类</option>`]
+      .concat(
+        roots
+          .filter((r) => r.id !== self.id)
+          .map((r) => `<option value="${r.id}"${self.parent_id === r.id ? " selected" : ""}>${esc(r.name)}</option>`)
+      )
+      .join("");
+    return `<select name="parent_id" class="cat-parent-select"${locked ? ` disabled title="该一级分类下还有 ${self.child_count} 个二级分类，需先处理子分类才能降级"` : ""}>${opts}</select>`;
+  };
+  const row = (c: Category, isSub: boolean) => {
+    const kids = kidsOf(c.id);
+    const total = (c.product_count || 0) + kids.reduce((n, k) => n + (k.product_count || 0), 0);
+    const countCell = isSub
+      ? `<span class="badge blue">${c.product_count ?? 0} 款商品</span>`
+      : `<span class="badge blue">直属 ${c.product_count ?? 0} 款</span>${
+          kids.length ? `<div class="muted small">含 ${kids.length} 个二级共 ${total} 款</div>` : ""
+        }`;
+    return `<tr class="${isSub ? "cat-sub" : "cat-root"}">
+      <td>
+        <form class="inline-edit-form" method="post" action="/categories/${c.id}/rename">
+          ${csrfInput(ctx.csrf)}
+          ${isSub ? `<span class="cat-branch" aria-hidden="true">└</span>` : ""}
+          <input type="text" name="name" value="${esc(c.name)}" required maxlength="32" class="inline-input" placeholder="分类名称">
+          ${parentSelect(c)}
+          <input type="number" name="sort" value="${c.sort}" style="width:64px" title="排序权重（越小越靠前）">
+          <button class="btn small secondary" type="submit">保存</button>
+        </form>
+      </td>
+      <td class="num">${countCell}</td>
+      <td class="num">
+        <form class="inline-form" method="post" action="/categories/${c.id}/delete" data-confirm="确定删除分类「${esc(c.name)}」吗？该分类下的商品将自动归为未分类。">
+          ${csrfInput(ctx.csrf)}
+          <button class="btn small danger" type="submit"${kids.length ? ` disabled title="下还有 ${kids.length} 个二级分类，请先删除或改挂子分类"` : ""}>删除</button>
+        </form>
+      </td>
+    </tr>`;
+  };
   const rows =
     cats.length > 0
-      ? cats
-          .map(
-            (c) => `<tr>
-              <td>
-                <form class="inline-edit-form" method="post" action="/categories/${c.id}/rename">
-                  ${csrfInput(ctx.csrf)}
-                  <input type="text" name="name" value="${esc(c.name)}" required maxlength="32" class="inline-input">
-                  <input type="number" name="sort" value="${c.sort}" style="width:72px" title="排序权重（越小越靠前）">
-                  <button class="btn small secondary" type="submit">保存</button>
-                </form>
-              </td>
-              <td class="num"><span class="badge blue">${c.product_count ?? 0} 款商品</span></td>
-              <td class="num">
-                <form class="inline-form" method="post" action="/categories/${c.id}/delete" data-confirm="确定删除分类「${esc(c.name)}」吗？该分类下的商品将自动归为未分类。">
-                  ${csrfInput(ctx.csrf)}
-                  <button class="btn small danger" type="submit">删除</button>
-                </form>
-              </td>
-            </tr>`
-          )
+      ? roots
+          .map((r) => row(r, false) + kidsOf(r.id).map((k) => row(k, true)).join(""))
+          .join("") +
+        // 兜底：上级已不存在的孤儿二级也要可见可改，否则会卡在列表里看不见
+        cats
+          .filter((c) => c.parent_id && !rootIds.has(c.parent_id))
+          .map((c) => row(c, true))
           .join("")
-      : emptyRow(3, "暂无商品分类");
+      : emptyRow(3, "暂无商品分类，右侧先建一个一级分类");
+
+  const parentOptions = `<option value="">＋ 作为一级分类</option>`
+    + roots.map((r) => `<option value="${r.id}">挂在「${esc(r.name)}」下</option>`).join("");
 
   return `
-    ${pageHead("🗂️ 商品分类与供应商", "管理商品类目结构与上游供应商通讯录", `<a class="btn primary" href="/suppliers">🏭 进入供应商管理 →</a>`)}
+    ${pageHead("🗂️ 商品分类与供应商", "两级类目结构：一级用于分组与筛选，二级用于精细建档", `<a class="btn primary" href="/suppliers">🏭 进入供应商管理 →</a>`)}
     <div class="grid cols-2">
-      <div class="card"><h3>📁 商品分类列表（支持直接改名与排序）</h3>
+      <div class="card"><h3>📁 分类结构（${roots.length} 个一级 · ${cats.length - roots.length} 个二级）</h3>
         <div class="table-wrap"><table class="table">
-          <thead><tr><th>分类名称 / 排序权重</th><th class="num">关联商品</th><th class="num">操作</th></tr></thead>
+          <thead><tr><th>分类名称 / 上级 / 排序</th><th class="num">关联商品</th><th class="num">操作</th></tr></thead>
           <tbody>${rows}</tbody>
         </table></div>
+        <p class="muted small mt">「上级」改成一级分类即把该行降为二级，改成「＋ 一级分类」即升为一级；商品挂在哪一级都支持，商品档案里按一级筛选会自动连带其下全部二级。</p>
       </div>
       <div>
         <div class="card"><h3>➕ 新增商品分类</h3>
@@ -294,6 +348,7 @@ export function categoryPage(ctx: ViewCtx, cats: Category[]): string {
               ${field("分类名称", `<input type="text" name="name" required maxlength="32" placeholder="例如：智能穿戴 / 数码配件">`, "", true)}
               ${field("排序权重", `<input type="number" name="sort" value="0" step="1">`, "数字越小排在越前面")}
             </div>
+            ${field("上级分类", `<select name="parent_id">${parentOptions}</select>`, "选「＋ 作为一级分类」即新建顶级类目；不同一级下允许同名二级")}
             <button class="btn primary" type="submit">＋ 创建分类</button>
           </form>
         </div>
