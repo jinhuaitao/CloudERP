@@ -188,7 +188,7 @@ export interface OrderItemsOptions {
   cartLines?: { product: Product; qty: number }[];
   /** 从原销售单带入的退货明细（可带原成交单价） */
   prefillLines?: { product: Product; qty: number; price?: number }[];
-  /** 是否保留「＋ 添加商品行」按钮（自助下单 / 退货单场景关闭） */
+  /** 是否提供「＋ 添加商品行」与空白行模板（仅客户自助下单关闭，改为跳转商品目录） */
   allowAddRow?: boolean;
   /** 底部「＋ 继续添加商品」改为跳转链接（自助下单 → 商品目录） */
   addRowHref?: string;
@@ -196,8 +196,8 @@ export interface OrderItemsOptions {
   headHint?: string;
   /** 锁定单价（客户自助下单按系统售价结算） */
   lockPrice?: boolean;
-  /** 允许把明细行全部删空（自助下单场景），删空后显示占位提示 */
-  allowEmptyRows?: boolean;
+  /** 明细区为空时的引导文案（默认按「添加商品行」按钮口径） */
+  emptyHint?: string;
 }
 
 function orderItemsBlock(
@@ -208,11 +208,12 @@ function orderItemsBlock(
   const allowAddRow = opts.allowAddRow !== false;
   const prefill = opts.prefillLines || [];
   const cart = opts.cartLines || [];
+  const rowOf = (o: ItemRowOpts) => itemRow(products, priceKey, o);
   const rows =
     prefill.length > 0
       ? prefill
           .map((l) =>
-            itemRow(products, priceKey, {
+            rowOf({
               preselectPid: l.product.id,
               initQty: l.qty,
               lockPrice: opts.lockPrice,
@@ -223,7 +224,7 @@ function orderItemsBlock(
       : cart.length > 0
         ? cart
             .map((l) =>
-              itemRow(products, priceKey, {
+              rowOf({
                 preselectPid: l.product.id,
                 initQty: l.qty,
                 cartId: l.product.id,
@@ -231,7 +232,26 @@ function orderItemsBlock(
               })
             )
             .join("")
-        : itemRow(products, priceKey, { preselectPid: opts.preselectPid, lockPrice: opts.lockPrice });
+        : opts.preselectPid
+          ? rowOf({ preselectPid: opts.preselectPid, lockPrice: opts.lockPrice })
+          : "";
+
+  // 默认不再预渲染空白明细行：无明细行时把行结构放进 <template>（不随表单提交），由 app.js 实例化；
+  // 已有明细行的页面由 app.js 按首行结构缓存一份空白行，避免重复下发整张商品下拉
+  const rowTemplate =
+    rows === "" && allowAddRow
+      ? `<template id="itemRowTemplate">${rowOf({ lockPrice: opts.lockPrice })}</template>`
+      : "";
+  const hasRows = rows !== "";
+  const emptyHint =
+    opts.emptyHint ||
+    (hasRows
+      ? allowAddRow
+        ? "🧾 商品明细已清空，点击上方「＋ 添加商品行」重新录入"
+        : "🛒 商品明细已清空，点击下方「＋ 继续添加商品」前往商品目录重新选购"
+      : allowAddRow
+        ? "🧾 尚未添加商品，点击上方「＋ 添加商品行」开始录入"
+        : "🛒 购物车是空的，点击下方「＋ 继续添加商品」前往商品目录选购");
 
   // 底部「继续添加」：给了跳转链接就渲染链接；否则仅在允许加行时渲染按钮
   const bottomAdd = opts.addRowHref
@@ -253,12 +273,9 @@ function orderItemsBlock(
       <span class="num">行小计</span>
       <span></span>
     </div>
-    <div id="orderItems"${opts.allowEmptyRows ? ' data-allow-empty="1"' : ""}>${rows}</div>
-    ${
-      opts.allowEmptyRows
-        ? `<div class="items-empty" data-role="items-empty" hidden>🛒 商品明细已清空，点击下方「＋ 继续添加商品」重新选购</div>`
-        : ""
-    }
+    <div id="orderItems">${rows}</div>
+    ${rowTemplate}
+    <div class="items-empty" data-role="items-empty"${hasRows ? " hidden" : ""}>${emptyHint}</div>
     <div class="order-summary-bar">
       ${bottomAdd}
       <div class="order-total" id="orderTotal">合计：<span>¥0.00</span></div>
@@ -338,8 +355,8 @@ export function purchaseFormPage(
           ${field("采购备注", `<input type="text" name="remark" maxlength="200" placeholder="选填，如：发票号、物流单号">`)}
         </div>
       </div>
-      ${orderItemsBlock(d.products, "purchase_price", { preselectPid: d.preselectPid, allowAddRow: false })}
-      <div class="btn-row">
+      ${orderItemsBlock(d.products, "purchase_price", { preselectPid: d.preselectPid })}
+      <div class="btn-row" id="orderSubmitBar">
         <button class="btn primary" type="submit">✅ 确认审核并入库</button>
         <a class="btn secondary" href="/purchase">取消</a>
       </div>
@@ -672,7 +689,6 @@ export function salesFormPage(ctx: ViewCtx, d: SalesFormData): string {
               addRowHref: "/catalog",
               headHint: cartHint,
               lockPrice: true,
-              allowEmptyRows: true,
             })
           : orderItemsBlock(sellable, "sale_price", { preselectPid: d.preselectPid })
       }
@@ -974,10 +990,14 @@ export function returnFormPage(ctx: ViewCtx, d: ReturnFormData): string {
       </div>
       ${orderItemsBlock(d.products, "sale_price", {
         prefillLines: prefill,
-        allowAddRow: false,
         headHint,
+        // 有原单带入时不开放自由加行：明细必须落在原销售单商品范围内（服务端同样校验）
+        allowAddRow: !hasPrefill,
+        emptyHint: hasPrefill
+          ? "🧾 退货明细已全部删除，请返回原销售单页重新点击「办理退货」"
+          : "🧾 尚未添加商品，点击上方「＋ 添加商品行」录入退货商品",
       })}
-      <div class="btn-row">
+      <div class="btn-row" id="orderSubmitBar">
         <button class="btn primary" type="submit">✅ 确认退货并入库</button>
         <a class="btn secondary" href="/returns">取消</a>
       </div>

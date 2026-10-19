@@ -338,36 +338,12 @@
       if (del) {
         del.addEventListener("click", function () {
           var cartId = row.getAttribute("data-cart-id");
-          // 自助下单允许把明细删到零行：清空后展示「继续添加商品」引导
-          if (box.getAttribute("data-allow-empty") === "1" && box.querySelectorAll(".item-row").length <= 1) {
-            if (cartId) cartRemove(Number(cartId));
-            row.remove();
-            toggleEmpty(true);
-            recalc();
-            toast("已清空商品明细，可点击「＋ 继续添加商品」重新选购");
-            return;
-          }
-          if (box.querySelectorAll(".item-row").length > 1) {
-            if (cartId) cartRemove(Number(cartId));
-            row.remove();
-            recalc();
-          } else if (cartId) {
-            // 最后一行来自购物车：删除即移出购物车并还原为空行，不阻断操作
-            cartRemove(Number(cartId));
-            row.removeAttribute("data-cart-id");
-            var selEl = row.querySelector("[data-role=item-product]");
-            var qtyEl = row.querySelector("[data-role=item-qty]");
-            var priceEl = row.querySelector("[data-role=item-price]");
-            var amtBox = row.querySelector("[data-role=item-amount]");
-            if (selEl) selEl.selectedIndex = 0;
-            if (qtyEl) qtyEl.value = "1";
-            if (priceEl) priceEl.value = "";
-            if (amtBox) amtBox.textContent = "¥0.00";
-            recalc();
-            toast("已从购物车移除该商品");
-          } else {
-            window.alert("一张单据至少需要保留一行商品明细");
-          }
+          if (cartId) cartRemove(Number(cartId));
+          row.remove();
+          // 允许删到零行：明细区回到空白引导态，提交按钮随之禁用
+          toggleEmpty(box.querySelectorAll(".item-row").length === 0);
+          recalc();
+          if (cartId) toast("已从购物车移除该商品");
         });
       }
     }
@@ -384,22 +360,48 @@
       });
     }
 
+    function resetBlank(row) {
+      row.removeAttribute("data-cart-id");
+      row.querySelectorAll("select").forEach(function (s) {
+        // 预选行会把 selected 写在 option 上，cloneNode 会按属性重建选中态，必须先清属性
+        s.querySelectorAll("option").forEach(function (o) {
+          o.removeAttribute("selected");
+        });
+        s.selectedIndex = 0;
+      });
+      row.querySelectorAll("input").forEach(function (i) {
+        var v = i.getAttribute("data-role") === "item-qty" ? "1" : "";
+        i.setAttribute("value", v);
+        i.value = v;
+      });
+      var amt = row.querySelector("[data-role=item-amount]");
+      if (amt) amt.textContent = "¥0.00";
+    }
+
+    // 空白行来源：优先服务端 <template>（默认无明细行时下发），否则按首行结构缓存一份
+    var blank = null;
+    function blankRow() {
+      if (!blank) {
+        var tpl = document.getElementById("itemRowTemplate");
+        if (tpl && tpl.content && tpl.content.firstElementChild) {
+          blank = tpl.content.firstElementChild.cloneNode(true);
+        } else {
+          var first = box.querySelector(".item-row");
+          if (!first) return null;
+          blank = first.cloneNode(true);
+          resetBlank(blank);
+        }
+      }
+      return blank.cloneNode(true);
+    }
+
     box.querySelectorAll(".item-row").forEach(bindRow);
     addBtns.forEach(function (addBtn) {
       addBtn.addEventListener("click", function () {
-        var first = box.querySelector(".item-row");
-        if (!first) return;
-        var clone = first.cloneNode(true);
-        clone.querySelectorAll("input").forEach(function (i) {
-          i.value = i.getAttribute("data-role") === "item-qty" ? "1" : "";
-        });
-        clone.querySelectorAll("select").forEach(function (s) {
-          s.selectedIndex = 0;
-        });
-        var amtEl = clone.querySelector("[data-role=item-amount]");
-        if (amtEl) amtEl.textContent = "¥0.00";
-        box.appendChild(clone);
-        bindRow(clone);
+        var row = blankRow();
+        if (!row) return;
+        box.appendChild(row);
+        bindRow(row);
         toggleEmpty(false);
         recalc();
       });
